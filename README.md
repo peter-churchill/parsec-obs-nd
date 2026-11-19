@@ -51,6 +51,18 @@ Generated data (`inputs/`, `runs/`, `results/`, `updrafts/`, `logs/`) is not tra
    python weight_updrafts.py --site ena --sigma-w 0.3          # sensitivity / no lidar yet
    ```
 
+## Measured composition: what exists
+
+```
+export OBS_REPO=/path/to/obs-ccn-nd-susceptibility      # for ebas_psd_search.py and arm_ena_nd_pnsd.py
+export ARM_USER=...; export ARM_TOKEN=...               # ARM Live, for the ARM sites
+python composition_search.py                            # first run crawls the EBAS catalogue (minutes), then cached
+```
+
+For every site with an inputs file: ACSM/AMS, filter-pack ions, OC/EC, black carbon and CCN datasets
+(EBAS stations within 30 km; ARM AOS datastreams), with the number of cloud hours inside each
+dataset's period. Writes `results/composition_inventory.csv` and `..._summary.csv`.
+
 ## PARSEC settings
 
 - adiabatic ascent, constant updraft, start RH 98 % at T0/P0, end 150 m above cloud base
@@ -76,6 +88,15 @@ sed -i '1529s/^\(\s*\)IF (ANY(loc(292)==cv))/\1IF (norg.ge.1) THEN; IF (ANY(loc(
 
 Lines 293 onwards have a related off-by-one (`isv+k` guarded by `norg.ge.k`) that only
 matters with SVOCs on.
+
+Second patch, `src/mo_parsec_kohler.f90` line 883: the dummy argument `ra_lims` of
+`calculate_kohler_spectrum` is declared `(na)` but the array is `(na+1)` bin edges. When the
+first activated bin of the initial CCN-spectrum diagnostic is the largest bin, the code reads
+`ra_lims(na+1)` and the bounds check stops the run (seen in ~5 % of SGP hours):
+
+```
+sed -i '883s/ra_lims(na) /ra_lims(na+1) /' src/mo_parsec_kohler.f90
+```
 
 ## Credit
 

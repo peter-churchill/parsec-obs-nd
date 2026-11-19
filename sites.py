@@ -79,6 +79,21 @@ SITES = {
                            pnsd=("cache", "results/pnsd_cache/lasic_smps_pnsd_hourly.nc")),
 }
 
+# (lat, lon, altitude m a.s.l.) for reanalysis look-ups (CAMS, ERA5). Mt Soledad and the pier
+# share a CAMS grid cell anyway; Cloudnet variants use their parent site.
+SITE_COORDS = {
+    "ena": (39.092, -28.026, 30), "ena_cloudnet": (39.092, -28.026, 30),
+    "sgp": (36.605, -97.486, 315), "sgp_cloudnet": (36.605, -97.486, 315),
+    "lasic": (-7.967, -14.350, 340), "lasic_cloudnet": (-7.967, -14.350, 340),
+    "epcape_pier": (32.867, -117.257, 10), "epcape_soledad": (32.840, -117.253, 250),
+    "bankhead": (34.342, -87.338, 293),
+    "puijo": (62.909, 27.655, 306), "pallas": (67.973, 24.116, 565), "kenttarova": (67.987, 24.243, 347),
+    "zeppelin": (78.907, 11.888, 474), "ny-alesund": (78.923, 11.922, 8),
+    "hyytiala": (61.847, 24.295, 181), "mace-head": (53.326, -9.899, 5), "cabauw": (51.970, 4.926, 0),
+    "melpitz": (51.530, 12.928, 86), "palaiseau": (48.713, 2.208, 156), "bucharest": (44.348, 26.029, 93),
+    "granada": (37.164, -3.605, 680), "schneefernerhaus": (47.417, 10.980, 2650), "norunda": (60.087, 17.480, 46),
+}
+
 # PARSEC mass-fraction order (8 columns in the Stockholm fork):
 # h2so4, (nh4)hso4, (nh4)2so4, OC, BC, dust, seasalt, SVOC (unified-organics column; kept 0)
 SPECIES = ["h2so4", "nh4hso4", "nh42so4", "oc", "bc", "dust", "seasalt", "svoc"]

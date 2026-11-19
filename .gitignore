@@ -1,5 +1,6 @@
 # generated data (rebuilt from the observation repo / produced by the runs)
 inputs/
+data/
 runs/
 results/
 updrafts/

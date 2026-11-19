@@ -63,6 +63,17 @@ For every site with an inputs file: ACSM/AMS, filter-pack ions, OC/EC, black car
 (EBAS stations within 30 km; ARM AOS datastreams), with the number of cloud hours inside each
 dataset's period. Writes `results/composition_inventory.csv` and `..._summary.csv`.
 
+## CAMS EAC4 composition (for hours without measured composition)
+
+```
+python cams_download.py --dry-run                     # requests per site (months with cloud hours only)
+nohup python -u cams_download.py > logs/cams_download.log 2>&1 &     # login node; ADS queues requests
+```
+
+Needs `~/.cdsapirc` for the Atmosphere Data Store and the EAC4 licence accepted. Sulfate, organic matter,
+black carbon, sea salt and dust mixing ratios plus T, q and geopotential on the lowest EAC4 pressure levels,
+in a small box around each site; one file per site and month in `data/cams/<site>/`.
+
 ## PARSEC settings
 
 - adiabatic ascent, constant updraft, start RH 98 % at T0/P0, end 150 m above cloud base

@@ -85,6 +85,8 @@ def main():
     ap.add_argument("--outdir", default=os.path.join(HERE, "data", "cams"))
     ap.add_argument("--box", type=float, default=0.75, help="half-width of the box around the site (deg)")
     ap.add_argument("--retries", type=int, default=3)
+    ap.add_argument("--last-month", default="2025-12",
+                    help="last month EAC4 covers on the ADS (later months are listed, not requested)")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -96,10 +98,15 @@ def main():
             print(f"{s}: no coordinates in sites.SITE_COORDS, skipped")
             continue
         months = months_with_cloud(s)
+        last = pd.Period(a.last_month, "M")
+        beyond = [m for m in months if m > last]
+        months = [m for m in months if m <= last]
         missing = [m for m in months
                    if not os.path.exists(os.path.join(a.outdir, s, f"eac4_{s}_{m}.nc"))]
         print(f"{s:18s} {len(months):3d} months with cloud hours, {len(missing):3d} to download, "
-              f"levels {','.join(site_levels(SITE_COORDS[s][2]))} hPa")
+              f"levels {','.join(site_levels(SITE_COORDS[s][2]))} hPa"
+              + (f"  | {len(beyond)} months after EAC4 ({beyond[0]}..{beyond[-1]}): need the CAMS analysis"
+                 if beyond else ""))
         todo += [(s, m) for m in missing]
     print(f"\n{len(todo)} requests in total")
     if a.dry_run or not todo:
@@ -127,7 +134,7 @@ def main():
                     os.remove(part)
                 if "licence" in msg.lower() or "license" in msg.lower():
                     sys.exit("Accept the EAC4 licence on the ADS website (dataset page, Download tab) and rerun.")
-                if "no data" in msg.lower() or "not available" in msg.lower():
+                if any(k in msg.lower() for k in ("no data", "not available", "valid combination")):
                     print("   (month outside EAC4 coverage? skipping)")
                     break
                 time.sleep(60 * attempt)

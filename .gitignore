@@ -1,0 +1,9 @@
+# generated data (rebuilt from the observation repo / produced by the runs)
+inputs/
+runs/
+results/
+updrafts/
+logs/
+__pycache__/
+*.pyc
+*.nc

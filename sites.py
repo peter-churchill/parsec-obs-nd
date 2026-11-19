@@ -11,11 +11,10 @@ pnsd:  ("cache", <file in results/pnsd_cache>)    hourly dN/dlogDp already gridd
        ("csv",   <Virtanen et al. PNSD csv>)      gridded on the fly with pnsd_tools.hourly_pnsd_csv
 kind:  "ndrop" (ARM NDROP retrieval), "cloudnet" (scaled-Frisch N), "insitu"
 
-Sites built only on Arrhenius (Norunda, Melpitz, Bucharest, Maido, Andoya,
-Oliktok, the Cloudnet versions of ENA/SGP/LASIC, Kenttarova and Ny-Alesund
-if their caches are missing) are listed with the paths they will have once
-their spectra are exported; build_parcel_inputs.py skips any site whose
-files are not present and says so.
+Some sites were built only on Arrhenius (Norunda, Melpitz, Bucharest, Bankhead,
+Oliktok, Maido, Andoya, the Cloudnet versions of ENA/LASIC), so their inputs must be
+built there. build_parcel_inputs.py skips any site whose files are not present
+and says so.
 """
 
 SITES = {
@@ -51,25 +50,27 @@ SITES = {
     "schneefernerhaus": dict(kind="cloudnet", regime="Continental",
                            built="results/schneefernerhaus/schneefernerhaus_cloudnet.nc",
                            pnsd=("cache", "results/pnsd_cache/schneefernerhaus_smps_pnsd_hourly.nc")),
+    # Kenttarova Cloudnet was built with the Pallas total-air DMPS (FI0096G), Ny-Alesund with the Zeppelin DMPS
     "kenttarova":     dict(kind="cloudnet", regime="Boreal", built="results/kenttarova/kenttarova_cloudnet.nc",
-                           pnsd=("cache", "results/pnsd_cache/kenttarova_pnsd_hourly.nc")),
+                           pnsd=("cache", "results/pnsd_cache/pallas_dmps_pnsd_hourly.nc")),
     "ny-alesund":     dict(kind="cloudnet", regime="Arctic", built="results/ny-alesund/ny-alesund_cloudnet.nc",
-                           pnsd=("cache", "results/pnsd_cache/ny-alesund_pnsd_hourly.nc")),
-    # --- built on Arrhenius: spectra still to be exported to results/pnsd_cache ---
+                           pnsd=("cache", "results/pnsd_cache/zeppelin_dmps_pnsd_hourly.nc")),
+    # --- built on Arrhenius (their built files and caches live in the Arrhenius copy of the obs repo) ---
+    # Oliktok has only UHSAS (parked elsewhere); Maido and Andoya have no spectra cache yet and are skipped.
     "norunda":        dict(kind="cloudnet", regime="Boreal", built="results/norunda/norunda_cloudnet.nc",
-                           pnsd=("cache", "results/pnsd_cache/norunda_pnsd_hourly.nc")),
+                           pnsd=("cache", "results/pnsd_cache/norunda_dmps_pnsd_hourly.nc")),
     "melpitz":        dict(kind="cloudnet", regime="Continental", built="results/melpitz/melpitz_cloudnet.nc",
-                           pnsd=("cache", "results/pnsd_cache/melpitz_pnsd_hourly.nc")),
+                           pnsd=("cache", "results/pnsd_cache/melpitz_smps_pnsd_hourly.nc")),
     "bucharest":      dict(kind="cloudnet", regime="Continental", built="results/bucharest/bucharest_cloudnet.nc",
-                           pnsd=("cache", "results/pnsd_cache/bucharest_pnsd_hourly.nc")),
+                           pnsd=("cache", "results/pnsd_cache/bucharest_smps_pnsd_hourly.nc")),
     "maido":          dict(kind="cloudnet", regime="Marine", built="results/maido/maido_cloudnet.nc",
                            pnsd=("cache", "results/pnsd_cache/maido_pnsd_hourly.nc")),
     "andoya":         dict(kind="cloudnet", regime="Arctic", built="results/andoya/andoya_cloudnet.nc",
                            pnsd=("cache", "results/pnsd_cache/andoya_pnsd_hourly.nc")),
     "oliktok":        dict(kind="cloudnet", regime="Arctic", built="results/oliktok/oliktok_cloudnet.nc",
-                           pnsd=("cache", "results/pnsd_cache/oliktok_pnsd_hourly.nc")),
+                           pnsd=("cache", "results/pnsd_cache/oli_uhsas_pnsd_hourly.nc")),
     "bankhead":       dict(kind="cloudnet", regime="Continental", built="results/bankhead/bankhead_cloudnet.nc",
-                           pnsd=("cache", "results/pnsd_cache/bankhead_pnsd_hourly.nc")),
+                           pnsd=("cache", "results/pnsd_cache/bnf_smps_pnsd_hourly.nc")),
     "ena_cloudnet":   dict(kind="cloudnet", regime="Marine", built="results/ena/ena_cloudnet_smps.nc",
                            pnsd=("cache", "results/pnsd_cache/ena_smps_pnsd_hourly.nc")),
     "sgp_cloudnet":   dict(kind="cloudnet", regime="Continental", built="results/sgp/sgp_cloudnet.nc",

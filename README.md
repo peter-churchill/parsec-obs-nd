@@ -122,6 +122,19 @@ With `--ccn-tier`, hours that would get only BC + CAMS or CAMS composition and h
 at the setpoint nearest `--ccn-ss` (default 0.3 %) get their (NH4)2SO4 / organics split re-chosen so
 the bulk kappa matches; BC, dust and sea salt are unchanged; `comp_source` starts with `ccn`.
 
+## Cloud-base temperature and pressure (ERA5)
+
+```bash
+python era5_download.py --dry-run                        # requests per ERA5 cell and month (cloud days)
+nohup python -u era5_download.py > logs/era5.log 2>&1 &   # needs ~/.cdsapirc_cds (CDS url + key)
+python build_thermo.py                                   # T0/P0 for hours still on the placeholder
+```
+
+ERA5 T and p are interpolated to site altitude + cloud base height (Cloudnet, NDROP) or to the station
+(in-cloud stations). Measured cloud-base values (NDROP built files, Zeppelin station) are kept; at the
+NDROP sites the script reports ERA5 minus measured as a check. ERA5 is on the CDS, not the ADS, so its
+key lives in a separate rc file; `~/.cdsapirc` stays pointed at the ADS for CAMS.
+
 ## Zeppelin: Bolin Centre cloud-residual dataset
 
 ```bash

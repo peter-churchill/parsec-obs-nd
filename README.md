@@ -63,6 +63,18 @@ For every site with an inputs file: ACSM/AMS, filter-pack ions, OC/EC, black car
 (EBAS stations within 30 km; ARM AOS datastreams), with the number of cloud hours inside each
 dataset's period. Writes `results/composition_inventory.csv` and `..._summary.csv`.
 
+## Measured composition: download
+
+```
+export ARM_USER=...; export ARM_TOKEN=...
+python obs_composition_download.py --dry-run
+nohup python -u obs_composition_download.py > logs/obs_comp_download.log 2>&1 &
+```
+
+ARM ACSM, PSAP/SP2 and CCN files for the cloud days (`data/obs_comp/arm/`), and the EBAS ACSM,
+filter-ion, black-carbon and CCN files listed by `composition_search.py` (`data/obs_comp/ebas/`).
+`data/obs_comp/manifest.csv` maps files to sites and categories.
+
 ## CAMS EAC4 composition (for hours without measured composition)
 
 ```

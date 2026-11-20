@@ -127,8 +127,14 @@ the bulk kappa matches; BC, dust and sea salt are unchanged; `comp_source` start
 ```bash
 python era5_download.py --dry-run                        # requests per ERA5 cell and month (cloud days)
 nohup python -u era5_download.py > logs/era5.log 2>&1 &   # needs ~/.cdsapirc_cds (CDS url + key)
-python build_thermo.py                                   # T0/P0 for hours still on the placeholder
+python met_download.py --dry-run                         # surface met: ARM MET, Cloudnet weather-station, FMI
+nohup python -u met_download.py > logs/met_download.log 2>&1 &
+python build_thermo.py                                   # T0/P0 for hours without measured cloud-base values
 ```
+
+Surface T, RH, p are taken along a dry adiabat to the measured cloud base where cloud base is within
+300 m of the surface LCL (coupled); in-cloud stations use their own T and p; ERA5 covers decoupled hours
+and sites without surface met.
 
 ERA5 T and p are interpolated to site altitude + cloud base height (Cloudnet, NDROP) or to the station
 (in-cloud stations). Measured cloud-base values (NDROP built files, Zeppelin station) are kept; at the

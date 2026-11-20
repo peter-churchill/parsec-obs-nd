@@ -274,34 +274,34 @@ def read_ebas_acsm(site, hours):
     return res
 
 
+def _ebas_var(ds, prefix, exclude=("_qc", "_ebasmetadata", "uncertainty", "perc", "prec", "stddev")):
+    """First data variable starting with `prefix` (amean preferred) and its factor to ug m-3 of the ion
+    (from 'ug S/m3' or 'ug N/m3' units or names)."""
+    c = [v for v in ds.data_vars if v.startswith(prefix) and not any(x in v for x in exclude)]
+    if not c:
+        return None, 1.0
+    v = sorted(c, key=lambda v: ("ug S" in v or "ug N" in v, not v.endswith("_amean")))[0]
+    u = (str(ds[v].attrs.get("units", "")) + " " + v).replace("_", " ")
+    f = M_SO4 / M_S if "ug S" in u else (M_NH4 / M_N if "ug N" in u else 1.0)
+    return v, f
+
+
 def read_ebas_filter(site, hours):
-    """Daily filter ions (ug m-3): nss sulfate, ammonium, sodium."""
+    """Daily filter ions (ug m-3): nss sulfate, ammonium, sodium. Variable names and S/N units are
+    matched loosely, since older EBAS files name them differently."""
     res = None
     for f in ebas_files(site, "filter_ions"):
         with xr.open_dataset(f) as ds:
             s, e = ebas_bounds(ds)
             n = len(s)
-            d = {}
-            v = pick(ds, "sulphate_corrected_ug_per_m3")
-            if v:
-                d["so4"] = ebas_series(ds, v)
-            elif pick(ds, "sulphate_corrected_ug S_per_m3"):
-                d["so4"] = ebas_series(ds, "sulphate_corrected_ug S_per_m3", M_SO4 / M_S)
-            else:  # total sulfate minus sea-salt sulfate (0.252 x Na) later
-                v = pick(ds, "sulphate_total_ug_per_m3")
-                d["so4_tot"] = (ebas_series(ds, v) if v else
-                                ebas_series(ds, "sulphate_total_ug S_per_m3", M_SO4 / M_S)
-                                if pick(ds, "sulphate_total_ug S_per_m3") else np.full(n, np.nan))
-            v = pick(ds, "ammonium_ug_per_m3")
-            d["nh4"] = (ebas_series(ds, v) if v else ebas_series(ds, "ammonium_ug N_per_m3", M_NH4 / M_N)
-                        if pick(ds, "ammonium_ug N_per_m3") else np.full(n, np.nan))
-            v = pick(ds, "sodium")
-            d["na"] = ebas_series(ds, v) if v else np.full(n, np.nan)
-            df = pd.DataFrame(d)
-            if "so4_tot" in df:
-                df["so4"] = df.pop("so4_tot") - 0.252 * df["na"].fillna(0)
-            df = df.dropna(subset=["so4"])
-            h = to_hours(s[df.index], e[df.index], df[["so4", "nh4", "na"]], hours)
+            col = lambda pre: (lambda v, k: ebas_series(ds, v, k) if v else np.full(n, np.nan))(*_ebas_var(ds, pre))  # noqa: E731
+            na = col("sodium")
+            so4 = col("sulphate_corrected")
+            tot = col("sulphate_total")
+            so4 = np.where(np.isfinite(so4), so4, tot - 0.252 * np.nan_to_num(na))
+            nh4 = col("ammonium")
+            df = pd.DataFrame(dict(so4=so4, nh4=nh4, na=na)).dropna(subset=["so4"])
+            h = to_hours(s[df.index], e[df.index], df, hours)
         print(f"    {os.path.basename(f)[:60]}: {h['so4'].notna().sum()} hours")
         res = h if res is None else res.combine_first(h)
     return res

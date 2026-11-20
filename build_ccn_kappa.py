@@ -9,8 +9,8 @@ For each hour in inputs/<site>_parcel_inputs.nc and each supersaturation step of
   ccn_pred   CCN predicted from the spectrum and the composition's bulk kappa (inputs kappa_bulk,
              from build_composition.py), for the closure ratio ccn_pred / ccn_obs
 
-Written to results/<site>_ccn_kappa.nc with dims (hour, ss), ss being the counter's setpoint rounded
-to 0.05 %. S is the counter's calibrated ("calculated") supersaturation where reported, else the
+Written to results/<site>_ccn_kappa.nc with dims (hour, ss), ss being the counter's supersaturation
+level (setpoints, or calibrated S where no setpoint is stored, grouped where they differ by < 10 %). S is the counter's calibrated ("calculated") supersaturation where reported, else the
 setpoint. D_c is flagged unreliable (kappa_ok = False) when the counter count exceeds the spectrum's
 total (no D_c), D_c lies in the lowest two bins of the spectrum, or kappa falls outside 0.02-1.5.
 
@@ -108,7 +108,7 @@ def _samples_arm(ds):
     s, e = arm_bounds(ds)
     out = []
     for v in ds.data_vars:
-        if v.startswith("qc_") or not re.match(r"(?i)^n_ccn", v):
+        if v.startswith("qc_") or not re.match(r"(?i)^n_ccn", v) or ds[v].dims != ("time",):
             continue
         suf = v[5:]
         set_v = next((c for c in (f"supersaturation_setpoint{suf}", "supersaturation_setpoint") if c in ds), None)
@@ -181,17 +181,44 @@ def read_ebas(site):
     return rows
 
 
+def ss_levels(x, gap=0.10):
+    """Group supersaturations into levels: a new level starts where sorted values jump by > `gap`
+    (relative). Returns each value's level label (median of the level, rounded to 0.01 %)."""
+    u = np.unique(np.round(x, 4))
+    lab = np.zeros(len(u), int)
+    for i in range(1, len(u)):
+        lab[i] = lab[i - 1] + (u[i] > u[i - 1] * (1 + gap))
+    med = pd.Series(u).groupby(lab).median().round(2).values
+    return med[lab[np.searchsorted(u, np.round(x, 4))]]
+
+
 def hourly(rows, hours):
-    """Hourly mean CCN and effective S per rounded setpoint: DataFrames (hour x ss)."""
+    """Hourly mean CCN and effective S per supersaturation level: DataFrames (hour x ss).
+
+    Samples shorter than ~1 h go to the hour of their midpoint; longer ones (e.g. 4-h EBAS averages)
+    to every hour whose midpoint they cover. Levels are clusters of the setpoint (or of the calibrated
+    S where no setpoint is reported), so day-to-day drift in the calibrated S stays in one level."""
     if not rows:
         return None, None
     df = pd.concat(rows, ignore_index=True)
     df = df[np.isfinite(df.n) & (df.n >= 0) & np.isfinite(df.ss_set) & (df.ss_set > 0.02)]
     if df.empty:
         return None, None
-    mid = pd.DatetimeIndex(df.start) + (pd.DatetimeIndex(df.end) - pd.DatetimeIndex(df.start)) / 2
-    df = df.assign(hour=mid.floor("h"), ss=np.round(df.ss_set / 0.05) * 0.05)
+    st, en = pd.DatetimeIndex(df.start), pd.DatetimeIndex(df.end)
+    long_ = (en - st) >= pd.Timedelta("55min")
+    df = df.assign(hour=(st + (en - st) / 2).floor("h"))
+    if long_.any():
+        lo = df[long_]
+        lo = lo[(pd.DatetimeIndex(lo.end) > hours.min()) & (pd.DatetimeIndex(lo.start) <= hours.max() + pd.Timedelta("1h"))]
+        hs = [pd.date_range((a - pd.Timedelta("30min")).ceil("h"), b - pd.Timedelta("30min") - pd.Timedelta("1ns"), freq="h")
+              for a, b in zip(pd.DatetimeIndex(lo.start), pd.DatetimeIndex(lo.end))]
+        lo = lo.assign(hour=hs).explode("hour").dropna(subset=["hour"])
+        df = pd.concat([df[~long_], lo], ignore_index=True)
+        df["hour"] = pd.DatetimeIndex(df.hour)
     df = df[df.hour.isin(hours)]
+    if df.empty:
+        return None, None
+    df = df.assign(ss=ss_levels(df.ss_set.values))
     if df.empty:
         return None, None
     g = df.groupby(["hour", "ss"])
@@ -238,7 +265,7 @@ def build_site(site):
                                              "long_name": "CCN from the spectrum and kappa_bulk"}),
          "kappa_bulk": ("hour", kb), "comp_source": ("hour", src.astype(object)),
          "n_total": ("hour", above[:, 0], {"units": "cm-3", "long_name": "spectrum total"})},
-        coords={"hour": hours.values, "ss": ("ss", ss, {"units": "%", "long_name": "setpoint, rounded"})},
+        coords={"hour": hours.values, "ss": ("ss", ss, {"units": "%", "long_name": "supersaturation level (setpoint cluster)"})},
         attrs={"T_kelvin": T_CCN, "sigma": SIGMA})
     os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
     op = os.path.join(HERE, "results", f"{site}_ccn_kappa.nc")

@@ -24,6 +24,7 @@ import argparse
 import glob
 import os
 import sys
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,8 @@ from sites import SITE_COORDS  # noqa: E402
 from updraft_download import ARM_STREAMS, CLOUDNET_SITES  # noqa: E402
 
 UPD = os.path.join(HERE, "data", "updraft")
+warnings.filterwarnings("ignore", message="Mean of empty slice")
+warnings.filterwarnings("ignore", message="Degrees of freedom")
 
 
 def layer_mask(height_agl, cbh, top, depth):

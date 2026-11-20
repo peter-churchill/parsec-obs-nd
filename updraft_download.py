@@ -10,13 +10,17 @@ ARM: the vertical-velocity statistics VAP (dlprofwstats4news), first stream with
   Bankhead                  bnfdlprofwstats4newsM1.c1
   -> data/updraft/arm/<stream>/
 Cloudnet: the doppler-lidar product (vertical stare) for the sites updraft_search.py found it for
-(Hyytiala, Kenttarova, Granada, Melpitz, Bucharest, Cabauw) -> data/updraft/cloudnet/<site id>/
+(Hyytiala, Kenttarova, Granada, Melpitz, Bucharest, Cabauw) -> data/updraft/cloudnet/<site id>/.
+With --product categorize (or radar, epsilon-radar): cloud-radar data for the sites without lidar
+(Norunda, Mace Head, Palaiseau, Schneefernerhaus, Ny-Alesund, and Ny-Alesund / Kenttarova for Zeppelin /
+Pallas) -> data/updraft/cloudnet_<product>/<site id>/
 
 Files already present are skipped. Needs network, OBS_REPO and ARM_USER / ARM_TOKEN for ARM.
 
 Examples
 --------
 python updraft_download.py --dry-run
+python updraft_download.py --source cloudnet --product categorize --dry-run
 nohup python -u updraft_download.py > logs/updraft_download.log 2>&1 &
 """
 import argparse
@@ -45,6 +49,11 @@ ARM_STREAMS = {
 }
 CLOUDNET_SITES = {"hyytiala": "hyytiala", "kenttarova": "kenttarova", "granada": "granada",
                   "melpitz": "melpitz", "bucharest": "bucharest", "cabauw": "cabauw"}
+# sites without Doppler lidar on their cloud days: cloud radar Doppler velocity (Cloudnet categorize: radar v
+# and Z on a 30-s grid with the target classification, much smaller than the level-1 radar files)
+CLOUDNET_RADAR_SITES = {"norunda": "norunda", "mace-head": "mace-head", "palaiseau": "palaiseau",
+                        "schneefernerhaus": "schneefernerhaus", "ny-alesund": "ny-alesund",
+                        "zeppelin": "ny-alesund", "pallas": "kenttarova"}
 
 
 def arm(a):
@@ -106,19 +115,22 @@ def fetch(url, dest, retries=4):
 
 
 def cloudnet(a):
-    for site, cid in CLOUDNET_SITES.items():
+    table = CLOUDNET_SITES if a.product == "doppler-lidar" else CLOUDNET_RADAR_SITES
+    seen = set()
+    for site, cid in table.items():
         days = cloud_days(site)
         if a.sites and site not in a.sites or not days:
             continue
-        files = get_json(f"{CLOUDNET}/files", {"site": cid, "product": "doppler-lidar",
+        files = get_json(f"{CLOUDNET}/files", {"site": cid, "product": a.product,
                                                "dateFrom": min(days).strftime("%Y-%m-%d"),
                                                "dateTo": max(days).strftime("%Y-%m-%d")})
-        files = [f for f in files if pd.Timestamp(f["measurementDate"]) in days]
+        files = [f for f in files if pd.Timestamp(f["measurementDate"]) in days and f["filename"] not in seen]
+        seen |= {f["filename"] for f in files}
         mb = sum(float(f.get("size", 0)) for f in files) / 1e6
-        print(f"Cloudnet {cid:12s} {len(files):4d} files, {mb:6.0f} MB", flush=True)
+        print(f"Cloudnet {a.product} {site:16s} ({cid:16s}) {len(files):4d} files, {mb:7.0f} MB", flush=True)
         if a.dry_run:
             continue
-        outdir = os.path.join(OUT, "cloudnet", cid)
+        outdir = os.path.join(OUT, "cloudnet" if a.product == "doppler-lidar" else f"cloudnet_{a.product}", cid)
         os.makedirs(outdir, exist_ok=True)
         res = [fetch(f["downloadUrl"], os.path.join(outdir, f["filename"])) for f in files]
         print(f"    downloaded {res.count('downloaded')}, skipped {res.count('skipped')}, "
@@ -130,6 +142,9 @@ def main():
     ap.add_argument("--obs-repo", default=os.environ.get("OBS_REPO"))
     ap.add_argument("--source", choices=["arm", "cloudnet", "both"], default="both")
     ap.add_argument("--sites", nargs="*")
+    ap.add_argument("--product", default="doppler-lidar",
+                    help="Cloudnet product: doppler-lidar (lidar sites) or categorize / radar / epsilon-radar for the "
+                         "sites without lidar (CLOUDNET_RADAR_SITES)")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
     if a.source in ("arm", "both"):

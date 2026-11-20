@@ -90,6 +90,22 @@ Store and the EAC4 (and EAC4 monthly) licences accepted. Aerosol species only (s
 matter, black carbon, sea salt, dust); T and humidity come from ERA5. EAC4 currently ends in
 December 2025; later days are listed, not requested.
 
+## Composition per hour
+
+```bash
+python build_composition.py --dry-run      # tiers per site, nothing written
+python build_composition.py                # writes massfrac, comp_source, m_* (ug m-3), kappa_bulk into inputs/
+```
+
+Hierarchy per hour: hourly ACSM (+ measured eBC, CAMS sea salt and dust) > daily EBAS filter ions
+(nss sulfate, ammonium, 3.26 x Na scaled to its submicron share with CAMS, organics = CAMS OM/SO4 x
+measured sulfate) > measured eBC + CAMS > CAMS only. `comp_source` records the tier, where BC came
+from and which CAMS product filled the rest (`cams3h` > `camsmon` > `camsclim` for hours after EAC4).
+Sulfate is split between H2SO4 / NH4HSO4 / (NH4)2SO4 from the NH4:SO4 molar ratio; ACSM nitrate and
+chloride go into the (NH4)2SO4 column as NH4NO3 / NH4Cl mass. eBC = absorption / MAC (6.6 m2 g-1 at
+637 nm, scaled 1/lambda). The placeholder fractions are kept as `massfrac_placeholder`. Rerun it when
+more ARM or CAMS files arrive; it always rebuilds from the placeholder.
+
 ## PARSEC settings
 
 - adiabatic ascent, constant updraft, start RH 98 % at T0/P0, end 150 m above cloud base

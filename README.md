@@ -153,6 +153,17 @@ wind (5-7 min means; sigma_w is a lower bound) and temperature stand in for clou
 residuals / whole-air aerosol give the observed activation diameter D50 per hour, to compare with
 PARSEC's activation radius.
 
+## Comparison with observed Nd
+
+```bash
+python compare_nd.py        # updraft weighting (pdf and flux) for every site with runs, then parcel vs observed Nd
+```
+
+Writes results/<site>_parcel_nd_<variant>_<weighting>.nc, results/nd_comparison_hours.csv,
+results/nd_comparison_summary.csv (by site, composition tier and cloud-base T/P source) and
+results/nd_parcel_vs_obs.png, and prints the Zeppelin activation-diameter check. Variants: the site's
+updraft file (obs); Zeppelin also with zero mean w; Puijo and Pallas also with fixed sigma_w bounds.
+
 ## PARSEC settings
 
 - adiabatic ascent, constant updraft, start RH 98 % at T0/P0, end 150 m above cloud base

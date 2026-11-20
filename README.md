@@ -122,6 +122,18 @@ With `--ccn-tier`, hours that would get only BC + CAMS or CAMS composition and h
 at the setpoint nearest `--ccn-ss` (default 0.3 %) get their (NH4)2SO4 / organics split re-chosen so
 the bulk kappa matches; BC, dust and sea salt are unchanged; `comp_source` starts with `ccn`.
 
+## Zeppelin: Bolin Centre cloud-residual dataset
+
+```bash
+wget -P data/bolin https://bolin.su.se/data/uploads/karlsson-2021-1.zip && unzip -o data/bolin/karlsson-2021-1.zip -d data/bolin
+python zeppelin_bolin.py     # updrafts/zeppelin_w_cloudbase.nc, T0/P0 in inputs, results/zeppelin_activation.nc
+```
+
+Karlsson et al. (2021), doi:10.17043/zeppelin-cloud-aerosol-1. The station is in cloud, so its vertical
+wind (5-7 min means; sigma_w is a lower bound) and temperature stand in for cloud-base values. Cloud
+residuals / whole-air aerosol give the observed activation diameter D50 per hour, to compare with
+PARSEC's activation radius.
+
 ## PARSEC settings
 
 - adiabatic ascent, constant updraft, start RH 98 % at T0/P0, end 150 m above cloud base

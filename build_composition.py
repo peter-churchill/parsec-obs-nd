@@ -9,6 +9,9 @@ order sites.SPECIES), the absolute masses behind them and a comp_source flag, fo
   filter    daily EBAS filter-pack ions: non-sea-salt sulfate and ammonium; sea salt = 3.26 x Na,
             scaled to its submicron share with CAMS' sea-salt bins; organics = CAMS OM/SO4 x measured
             sulfate; measured eBC if any, else CAMS BC; CAMS dust
+  ccn       (only with --ccn-tier) hours that would be "bc" or "cams" but have a valid kappa from the
+            CCN counter (build_ccn_kappa.py): the (nh4)2so4 + organics volume is re-split so the bulk
+            kappa matches kappa_ccn at the setpoint nearest --ccn-ss; BC, dust and sea salt unchanged
   bc        measured eBC, everything else CAMS
   cams      CAMS only
 
@@ -41,6 +44,7 @@ Examples
 --------
 python build_composition.py                        # all sites with an inputs file
 python build_composition.py --sites sgp pallas --dry-run
+python build_ccn_kappa.py && python build_composition.py --ccn-tier   # with the CCN tier
 """
 import argparse
 import glob
@@ -430,7 +434,41 @@ def sulfate_split(so4, nh4):
     return h2 * M_H2SO4, abs_ * M_ABS, as_ * M_AS
 
 
-def build_site(site, dry_run=False):
+def ccn_kappa_for_hours(site, hours, target, window=0.15):
+    """kappa_ccn per hour at the valid setpoint nearest `target` (within `window` %), from build_ccn_kappa.py."""
+    p = os.path.join(HERE, "results", f"{site}_ccn_kappa.nc")
+    out = pd.Series(np.nan, index=hours)
+    if not os.path.exists(p):
+        print(f"   --ccn-tier: no {os.path.relpath(p, HERE)} (run build_ccn_kappa.py first)")
+        return out
+    with xr.open_dataset(p) as c:
+        ss = c["ss"].values.astype(float)
+        k = c["kappa_ccn"].where(c["kappa_ok"]).to_pandas().reindex(hours)
+    for j in np.argsort(np.abs(ss - target)):
+        if abs(ss[j] - target) <= window + 1e-9:
+            out = out.fillna(k.iloc[:, j])
+    return out
+
+
+def apply_ccn_kappa(mass, kc):
+    """Re-split the (nh4)2so4 + organics volume of each row so the bulk kappa equals kc; BC, dust and
+    sea salt are kept. Returns new masses and a mask of rows where the split hit 0 or 1."""
+    m = mass.copy()
+    v = m / RHO
+    v_ao = v[:, 2] + v[:, 3]
+    k_rest = (v[:, [0, 1, 4, 5, 6]] * KAPPA[[0, 1, 4, 5, 6]]).sum(axis=1)
+    v_rest = v[:, [0, 1, 4, 5, 6]].sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        x = ((kc * (v_rest + v_ao) - k_rest) / v_ao - KAPPA[3]) / (KAPPA[2] - KAPPA[3])
+    clipped = np.isfinite(x) & ((x < 0) | (x > 1))
+    x = np.clip(x, 0, 1)
+    ok = np.isfinite(x) & (v_ao > 0)
+    m[ok, 2] = x[ok] * v_ao[ok] * RHO[2]
+    m[ok, 3] = (1 - x[ok]) * v_ao[ok] * RHO[3]
+    return m, ok, clipped & ok
+
+
+def build_site(site, dry_run=False, ccn_tier=False, ccn_ss=0.3):
     path = os.path.join(HERE, "inputs", f"{site}_parcel_inputs.nc")
     if not os.path.exists(path):
         return None
@@ -482,8 +520,19 @@ def build_site(site, dry_run=False):
     good = np.isfinite(tot) & (tot > 0)
 
     tier = np.where(use_a, "acsm", np.where(use_f, "filter", np.where(have_bc, "bc", "cams")))
+    if ccn_tier:
+        kc = ccn_kappa_for_hours(site, hours, ccn_ss).values
+        cand = np.isin(tier, ["bc", "cams"]) & np.isfinite(kc) & good
+        m2, ok2, clip2 = apply_ccn_kappa(mass[cand], kc[cand])
+        idx = np.where(cand)[0][ok2]
+        mass[idx] = m2[ok2]
+        tier = tier.astype(object)
+        tier[idx] = "ccn"
+        tot = mass.sum(axis=1)
+        print(f"   --ccn-tier: {len(idx)} hours re-split to match kappa_ccn near {ccn_ss} % "
+              f"({int(clip2.sum())} at the (nh4)2so4-only or organics-only limit)")
     bctag = np.where(have_bc, "+bc_obs", "+bc_cams")
-    src = np.array([t + (b if t in ("acsm", "filter") else "") + ("+" + c if c else "+nocams")
+    src = np.array([t + (b if t in ("acsm", "filter", "ccn") else "") + ("+" + c if c else "+nocams")
                     for t, b, c in zip(tier, bctag, ctag.values)], dtype=object)
     src[~good] = "regime_placeholder"
 
@@ -521,12 +570,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sites", nargs="*")
     ap.add_argument("--dry-run", action="store_true", help="report the tiers, do not write")
+    ap.add_argument("--ccn-tier", action="store_true",
+                    help="hours that would get only BC + CAMS or CAMS composition: split (nh4)2so4 vs organics "
+                         "to match kappa_ccn from results/<site>_ccn_kappa.nc (build_ccn_kappa.py)")
+    ap.add_argument("--ccn-ss", type=float, default=0.3, help="target setpoint for --ccn-tier, %% (default 0.3)")
     a = ap.parse_args()
     sites = a.sites or sorted(os.path.basename(p).replace("_parcel_inputs.nc", "")
                               for p in glob.glob(os.path.join(HERE, "inputs", "*_parcel_inputs.nc")))
     rows = []
     for s in sites:
-        r = build_site(s, a.dry_run)
+        r = build_site(s, a.dry_run, a.ccn_tier, a.ccn_ss)
         if r is not None:
             for t, n in r.str.split("+").str[0].value_counts().items():
                 rows.append(dict(site=s, tier=t, hours=n))

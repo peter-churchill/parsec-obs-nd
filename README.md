@@ -106,6 +106,22 @@ chloride go into the (NH4)2SO4 column as NH4NO3 / NH4Cl mass. eBC = absorption /
 637 nm, scaled 1/lambda). The placeholder fractions are kept as `massfrac_placeholder`. Rerun it when
 more ARM or CAMS files arrive; it always rebuilds from the placeholder.
 
+## Hygroscopicity from the CCN counters
+
+```bash
+python build_composition.py                   # kappa_bulk from the composition
+python build_ccn_kappa.py                     # kappa_ccn per hour and setpoint, CCN closure -> results/<site>_ccn_kappa.nc
+python build_composition.py --ccn-tier        # optional: CCN-constrained composition where only BC/CAMS exist
+python build_ccn_kappa.py                     # closure again with the final composition
+```
+
+kappa_ccn comes from the critical dry diameter D_c at which the hourly spectrum holds as many
+particles as the counter measured (kappa = 4A^3 / (27 D_c^3 ln^2 S), T = 298 K). The closure compares
+the counter with CCN predicted from the spectrum and kappa_bulk, per setpoint and composition tier.
+With `--ccn-tier`, hours that would get only BC + CAMS or CAMS composition and have a valid kappa_ccn
+at the setpoint nearest `--ccn-ss` (default 0.3 %) get their (NH4)2SO4 / organics split re-chosen so
+the bulk kappa matches; BC, dust and sea salt are unchanged; `comp_source` starts with `ccn`.
+
 ## PARSEC settings
 
 - adiabatic ascent, constant updraft, start RH 98 % at T0/P0, end 150 m above cloud base

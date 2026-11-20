@@ -175,13 +175,33 @@ def main():
     with np.errstate(invalid="ignore", divide="ignore"):
         af = np.where(whole > 1, res_c / whole, np.nan)
     D50 = d50(af, d1)
+    # integral activation diameter: whole-air N above D_act equals the residual number (as D_c for CCN);
+    # less sensitive to noise in single bins than the AF = 0.5 crossing
+    dl = dlog(d1)
+    above = np.cumsum((np.nan_to_num(whole) * dl)[:, ::-1], axis=1)[:, ::-1]
+    nres = np.nansum(res_c * dl, axis=1)
+    lde = np.log10(d1) - dl / 2
+    Dint = np.full(len(ts), np.nan)
+    for i in range(len(ts)):
+        a_ = above[i][::-1]
+        if not np.isfinite(nres[i]) or nres[i] <= 0 or nres[i] > a_[-1] or not np.isfinite(whole[i]).any():
+            continue
+        k = np.searchsorted(a_, nres[i])
+        e = lde[::-1]
+        if 0 < k < len(a_):
+            f = (nres[i] - a_[k - 1]) / max(a_[k] - a_[k - 1], 1e-9)
+            Dint[i] = 10 ** (e[k - 1] + f * (e[k] - e[k - 1]))
     print(f"   whole-air match for {np.sum(j >= 0)} scans; D50 found in {np.isfinite(D50).sum()}, "
           f"median {np.nanmedian(D50):.0f} nm (10-90 %: {np.nanpercentile(D50, 10):.0f}-{np.nanpercentile(D50, 90):.0f})")
 
-    df = pd.DataFrame(dict(hour=ts.floor("h"), d50=D50, n_res=n_cor, n_fm=n_fm))
+    print(f"   integral activation diameter found in {np.isfinite(Dint).sum()}, median {np.nanmedian(Dint):.0f} nm "
+          f"(10-90 %: {np.nanpercentile(Dint, 10):.0f}-{np.nanpercentile(Dint, 90):.0f})")
+    df = pd.DataFrame(dict(hour=ts.floor("h"), d50=D50, d_int=Dint, n_res=n_cor, n_fm=n_fm))
     H = df.groupby("hour").median().reindex(hours)
     AF = pd.DataFrame(af, index=ts.floor("h")).groupby(level=0).median().reindex(hours)
     out = xr.Dataset({"d50": ("hour", H.d50.values, {"units": "nm", "long_name": "diameter where AF reaches 0.5"}),
+                      "d_act_int": ("hour", H.d_int.values, {"units": "nm",
+                                     "long_name": "diameter above which whole-air N equals the residual number"}),
                       "af": (("hour", "diameter"), AF.to_numpy(float), {"long_name": "activated fraction (hourly median)"}),
                       "n_residual": ("hour", H.n_res.values, {"units": "cm-3", "long_name": "corrected residual number"}),
                       "n_fm120": ("hour", H.n_fm.values, {"units": "cm-3", "long_name": "FM-120 droplet number"}),
@@ -192,7 +212,7 @@ def main():
     out.to_netcdf(os.path.join(HERE, "results", "zeppelin_activation.nc"))
     print(f"   -> results/zeppelin_activation.nc: D50 in {out.d50.notnull().sum().item()} of {len(hours)} hours")
     if "Nd_obs" in ds:
-        m = np.isfinite(H.n_fm.values) & np.isfinite(ds["Nd_obs"].values)
+        m = np.isfinite(H.n_fm.values) & (H.n_fm.values > 0) & np.isfinite(ds["Nd_obs"].values)
         if m.any():
             print(f"   our Nd_obs vs FM-120 (hourly medians, {m.sum()} h): ratio median "
                   f"{np.median(ds['Nd_obs'].values[m] / H.n_fm.values[m]):.2f}")

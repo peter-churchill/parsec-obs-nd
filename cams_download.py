@@ -14,9 +14,11 @@ Variables: sulphate, hydrophilic + hydrophobic organic matter, hydrophilic + hyd
 sea salt 0.03-0.5 / 0.5-5 / 5-20 um, dust 0.03-0.55 / 0.55-0.9 / 0.9-20 um (kg kg-1). EAC4 has no
 nitrate or ammonium. Temperature and humidity come from ERA5 in the thermodynamics step instead.
 
-Requests run --workers at a time (ADS queues each request, often for an hour or more, so overlapping
-the waits is what makes this finish in days rather than weeks). Finished files are skipped, so the
-script can be stopped and restarted. Months after --last-month (EAC4's current end) are listed only.
+ADS allows only about one queued request per dataset and user, so requests run one at a time (a
+"queue full" reply makes the script wait 10 min and resubmit). The two modes use different datasets
+and can run at the same time. Finished files are skipped, so the script can be stopped and restarted.
+Months after --last-month (EAC4's current end) are listed only. Killing the script does not cancel a
+request already queued at ADS: cancel stale ones at https://ads.atmosphere.copernicus.eu/requests.
 
 Needs ~/.cdsapirc for https://ads.atmosphere.copernicus.eu/api, the EAC4 licences accepted, and
 cdsapi >= 0.7.2. Run on a login node (compute nodes may have no internet) under nohup or tmux.
@@ -25,8 +27,8 @@ Examples
 --------
 python cams_download.py --dry-run                         # requests per region, daily mode
 python cams_download.py --mode monthly --dry-run
-nohup python -u cams_download.py --mode monthly --workers 3 > logs/cams_monthly.log 2>&1 &
-nohup python -u cams_download.py --workers 4 > logs/cams_daily.log 2>&1 &
+nohup python -u cams_download.py --mode monthly > logs/cams_monthly.log 2>&1 &
+nohup python -u cams_download.py --mode daily   > logs/cams_daily.log 2>&1 &
 """
 import argparse
 import os
@@ -143,7 +145,9 @@ def run_job(job, retries):
     os.makedirs(os.path.dirname(out), exist_ok=True)
     part = out + ".part"
     client = cdsapi.Client()
-    for attempt in range(1, retries + 1):
+    attempt, waited = 0, 0
+    while attempt < retries:
+        attempt += 1
         t0 = time.time()
         try:
             log(f"submit {region} {key} (attempt {attempt}, {len(req.get('date', req.get('month', [])))} "
@@ -158,6 +162,15 @@ def run_job(job, retries):
             if os.path.exists(part):
                 os.remove(part)
             low = msg.lower()
+            if "maximum number queued" in low or "too many" in low:
+                # ADS per-user queue limit for this dataset: wait for a slot, not counted as an attempt
+                attempt -= 1
+                waited += 1
+                if waited > 144:                       # ~1 day of waiting
+                    log(f"giving up {region} {key}: queue still full after a day")
+                    return False
+                time.sleep(600)
+                continue
             if "licence" in low or "license" in low:
                 log("   accept the licence for this dataset on the ADS website (Download tab), then rerun")
                 return False
@@ -171,7 +184,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=["daily", "monthly"], default="daily")
     ap.add_argument("--sites", nargs="+", help="restrict to these sites (default: all with inputs)")
-    ap.add_argument("--workers", type=int, default=4, help="requests in the ADS queue at the same time")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="requests in the ADS queue at the same time (ADS allows ~1 per dataset and user)")
     ap.add_argument("--retries", type=int, default=3)
     ap.add_argument("--last-month", default="2025-12", help="last month EAC4 covers on the ADS")
     ap.add_argument("--dry-run", action="store_true")

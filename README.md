@@ -68,8 +68,8 @@ dataset's period. Writes `results/composition_inventory.csv` and `..._summary.cs
 ```
 python cams_download.py --mode monthly --dry-run      # EAC4 monthly means: one request per region and year (fast)
 python cams_download.py --dry-run                     # 3-hourly EAC4: one request per region and month, cloud days only
-nohup bash -c "python -u cams_download.py --mode monthly --workers 3 && python -u cams_download.py --workers 4" \
-      > logs/cams_download.log 2>&1 &
+nohup python -u cams_download.py --mode monthly > logs/cams_monthly.log 2>&1 &    # the two modes use different
+nohup python -u cams_download.py --mode daily   > logs/cams_daily.log 2>&1 &      # datasets, so both can run
 ```
 
 Sites are grouped into five regional boxes (Europe, SGP + Bankhead, EPCAPE, ENA, LASIC), because ADS

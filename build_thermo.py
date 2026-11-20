@@ -84,6 +84,8 @@ def interp_at(parts, hours, z_target):
 
 
 MEASURED = ("built_file_cloud_base", "zeppelin_station")       # never replaced
+# surface met measured at another altitude than the site (m a.s.l.): Mt Soledad uses the pier MET
+MET_ALT = {"epcmetM1.b1": 10.0}
 G_CP = G0 / 1004.0                                              # dry-adiabatic lapse rate, K m-1
 
 
@@ -120,6 +122,7 @@ def load_surface(site, hours):
                 print(f"    skip {os.path.basename(f)}: {str(ex)[:80]}")
         if parts:
             return _hourly(pd.concat(parts), hours), f"arm_{stream}"
+    # (MET_ALT keys are the stream names; build_site reads the altitude from the returned source name)
     for cid in CLOUDNET_ALIASES.get(site, [site]):
         files = sorted(glob.glob(os.path.join(met, "cloudnet", cid, "*.nc")))
         parts = []
@@ -183,7 +186,9 @@ def build_site(site, dry_run=False, coupled_m=300.0):
     if sfc is not None:
         Ts, RHs, Ps = sfc["T"].values, sfc["RH"].values, sfc["P"].values
         if kind == "insitu":
-            T_s, P_s, z_lcl = Ts, Ps, np.full(len(hours), np.nan)
+            dz = alt - MET_ALT.get(ssrc.replace("arm_", ""), alt)     # met below the in-cloud station
+            T_s, P_s, z_lcl = surface_to_cloud_base(Ts, RHs, Ps, np.full(len(hours), dz))
+            z_lcl = np.full(len(hours), np.nan)
         else:
             T_s, P_s, z_lcl = surface_to_cloud_base(Ts, RHs, Ps, cbh)
         have_s = np.isfinite(T_s) & np.isfinite(P_s)

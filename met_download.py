@@ -8,9 +8,8 @@ at the in-cloud stations.
   ARM sites           MET b1 streams (1-min temp_mean, rh_mean, atmos_pressure) -> data/met/arm/<stream>/
   Cloudnet sites      Cloudnet weather-station product (air_temperature, relative_humidity, air_pressure)
                       -> data/met/cloudnet/<site id>/
-  Puijo, Pallas       FMI open data, hourly TA / RH / PA of the station itself (Kuopio Puijo tower,
-                      Sammaltunturi) -> data/met/fmi/<site>.csv. Station names are tried in turn; the one
-                      that answers is reported.
+  Puijo, Pallas,      FMI open data, hourly TA / RH / PA (Kuopio Puijo tower, Sammaltunturi, Kenttarova);
+  Kenttarova          stations found by name in FMI's station list -> data/met/fmi/<site>.csv
 
 --dry-run only reports what exists for the cloud days. Files already present are skipped. Needs network,
 OBS_REPO and ARM_USER / ARM_TOKEN for ARM.
@@ -43,8 +42,8 @@ ARM_MET = {
     "epcape_pier": ["epcmetM1.b1"], "epcape_soledad": ["epcmetS2.b1", "epcmetM1.b1"],
     "bankhead": ["bnfmetM1.b1"],
 }
-FMI_PLACES = {"puijo": ["Kuopio Puijo", "Kuopio Puijon torni"],
-              "pallas": ["Muonio Sammaltunturi", "Enontekiö Sammaltunturi", "Muonio Pallas Sammaltunturi"]}
+# FMI stations, matched by name in FMI's station list (fmi::ef::stations) and then queried by fmisid
+FMI_STATIONS = {"puijo": ["Puijo"], "pallas": ["Sammaltunturi"], "kenttarova": ["Kenttärova"]}
 FMI_WFS = "https://opendata.fmi.fi/wfs"
 
 
@@ -108,58 +107,73 @@ def cloudnet(a):
         print(f"    downloaded {res.count('downloaded')}, skipped {res.count('skipped')}, failed {res.count('failed')}")
 
 
-def fmi_month(place, start, end):
+def fmi_stations():
+    """{fmisid: [names]} from FMI's station list."""
+    import xml.etree.ElementTree as ET
+    q = {"service": "WFS", "version": "2.0.0", "request": "getFeature", "storedquery_id": "fmi::ef::stations"}
+    with urllib.request.urlopen(FMI_WFS + "?" + urllib.parse.urlencode(q), timeout=180) as r:
+        root = ET.fromstring(r.read())
+    gml = "{http://www.opengis.net/gml/3.2}"
+    out = {}
+    for fac in (e for e in root.iter() if str(e.tag).endswith("}EnvironmentalMonitoringFacility")):
+        ident = fac.find(f"{gml}identifier")
+        if ident is not None:
+            out[ident.text.strip()] = [n.text for n in fac.findall(f"{gml}name") if n.text]
+    return out
+
+
+def fmi_month(fmisid, start, end):
+    import xml.etree.ElementTree as ET
     q = {"service": "WFS", "version": "2.0.0", "request": "getFeature",
-         "storedquery_id": "fmi::observations::weather::hourly::simple", "place": place,
+         "storedquery_id": "fmi::observations::weather::hourly::simple", "fmisid": fmisid,
          "parameters": "TA_PT1H_AVG,RH_PT1H_AVG,PA_PT1H_AVG",
          "starttime": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "endtime": end.strftime("%Y-%m-%dT%H:%M:%SZ")}
     with urllib.request.urlopen(FMI_WFS + "?" + urllib.parse.urlencode(q), timeout=120) as r:
-        xml = r.read().decode()
-    import xml.etree.ElementTree as ET
-    ns = {"wfs": "http://www.opengis.net/wfs/2.0", "BsWfs": "http://xml.fmi.fi/schema/wfs/2.0"}
-    rows = []
-    for el in ET.fromstring(xml).iter("{http://xml.fmi.fi/schema/wfs/2.0}BsWfsElement"):
-        rows.append(dict(time=el.find("BsWfs:Time", ns).text, param=el.find("BsWfs:ParameterName", ns).text,
-                         value=float(el.find("BsWfs:ParameterValue", ns).text)))
+        root = ET.fromstring(r.read())
+    b = "{http://xml.fmi.fi/schema/wfs/2.0}"
+    rows = [dict(time=el.find(f"{b}Time").text, param=el.find(f"{b}ParameterName").text,
+                 value=float(el.find(f"{b}ParameterValue").text)) for el in root.iter(f"{b}BsWfsElement")]
     return pd.DataFrame(rows)
 
 
 def fmi(a):
-    for site, places in FMI_PLACES.items():
+    try:
+        stations = fmi_stations()
+    except Exception as e:                                                          # noqa: BLE001
+        print(f"FMI: station list failed: {str(e)[:100]}")
+        return
+    for site, keys in FMI_STATIONS.items():
         if a.sites and site not in a.sites:
             continue
         days = cloud_days(site)
         if not days:
             continue
+        cands = [(fid, names) for fid, names in stations.items()
+                 if any(k.lower() in " ".join(names).lower() for k in keys)]
+        if not cands:
+            print(f"FMI {site}: no station matching {keys}; ERA5 will be used")
+            continue
         out = os.path.join(OUT, "fmi", f"{site}.csv")
         months = sorted({pd.Period(d, "M") for d in days})
-        place = None
-        for p in places:                                    # find a station name that answers
-            try:
-                m0 = months[len(months) // 2]
-                df = fmi_month(p, m0.start_time, m0.start_time + pd.Timedelta(days=3))
-                if len(df):
-                    place = p
-                    break
-            except Exception as e:                                                  # noqa: BLE001
-                print(f"FMI {site}: '{p}' -> {str(e)[:80]}")
-        if place is None:
-            print(f"FMI {site}: none of {places} answered; ERA5 will be used")
-            continue
-        print(f"FMI {site:8s} station '{place}', {len(months)} months with cloud days", flush=True)
+        fid, names = cands[0]
+        if len(cands) > 1:
+            print(f"FMI {site}: several stations match {keys}: " + "; ".join(f"{f} {n[0]}" for f, n in cands) +
+                  f" -> using {fid}")
+        print(f"FMI {site:10s} station {fid} '{names[0]}', {len(months)} months with cloud days", flush=True)
         if a.dry_run or os.path.exists(out):
             continue
         parts = []
         for m in months:
             try:
-                parts.append(fmi_month(place, m.start_time, m.end_time.floor("h")))
+                parts.append(fmi_month(fid, m.start_time, m.end_time.floor("h")))
             except Exception as e:                                                  # noqa: BLE001
                 print(f"    {m}: {str(e)[:80]}")
+        parts = [p for p in parts if len(p)]
         if parts:
             df = pd.concat(parts).pivot_table(index="time", columns="param", values="value")
             os.makedirs(os.path.dirname(out), exist_ok=True)
             df.to_csv(out)
-            print(f"    -> {os.path.relpath(out, HERE)}: {len(df)} hours")
+            print(f"    -> {os.path.relpath(out, HERE)}: {len(df)} hours with data")
 
 
 def main():

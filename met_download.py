@@ -136,6 +136,26 @@ def fmi_month(fmisid, start, end):
     return pd.DataFrame(rows)
 
 
+def fmi_10min(fmisid, start, end):
+    """10-min observations (t2m, rh, p_sea) in 7-day chunks, for stations without hourly averages."""
+    import xml.etree.ElementTree as ET
+    b = "{http://xml.fmi.fi/schema/wfs/2.0}"
+    rows = []
+    t = start
+    while t < end:
+        t1 = min(t + pd.Timedelta(days=7), end)
+        q = {"service": "WFS", "version": "2.0.0", "request": "getFeature",
+             "storedquery_id": "fmi::observations::weather::simple", "fmisid": fmisid,
+             "parameters": "t2m,rh,p_sea", "timestep": "10",
+             "starttime": t.strftime("%Y-%m-%dT%H:%M:%SZ"), "endtime": t1.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        with urllib.request.urlopen(FMI_WFS + "?" + urllib.parse.urlencode(q), timeout=120) as r:
+            root = ET.fromstring(r.read())
+        rows += [dict(time=el.find(f"{b}Time").text, param=el.find(f"{b}ParameterName").text,
+                      value=float(el.find(f"{b}ParameterValue").text)) for el in root.iter(f"{b}BsWfsElement")]
+        t = t1
+    return pd.DataFrame(rows)
+
+
 def fmi(a):
     try:
         stations = fmi_stations()
@@ -168,7 +188,24 @@ def fmi(a):
                 parts.append(fmi_month(fid, m.start_time, m.end_time.floor("h")))
             except Exception as e:                                                  # noqa: BLE001
                 print(f"    {m}: {str(e)[:80]}")
-        parts = [p for p in parts if len(p)]
+        parts = [p for p in parts if len(p) and p["value"].notna().any()]
+        if not parts:
+            # no hourly averages for this station: 10-min data, averaged to hours here, renamed to the hourly
+            # names; p_sea (sea-level pressure) is reduced to the station in build_thermo.py (column P_SEA)
+            print(f"    no hourly averages; trying 10-min observations", flush=True)
+            for m in months:
+                try:
+                    d = fmi_10min(fid, m.start_time, m.end_time.floor("h"))
+                    if len(d):
+                        d["time"] = (pd.to_datetime(d["time"]).dt.ceil("h")).astype(str)
+                        d = d.groupby(["time", "param"], as_index=False)["value"].mean()
+                        d["param"] = d["param"].map({"t2m": "TA_PT1H_AVG", "rh": "RH_PT1H_AVG", "p_sea": "P_SEA"})
+                        parts.append(d)
+                except Exception as e:                                              # noqa: BLE001
+                    print(f"    {m}: {str(e)[:80]}")
+            parts = [p for p in parts if len(p) and p["value"].notna().any()]
+        if not parts:
+            print(f"    FMI returned no data for {site}; ERA5 / Cloudnet model will be used")
         if parts:
             df = pd.concat(parts).pivot_table(index="time", columns="param", values="value")
             os.makedirs(os.path.dirname(out), exist_ok=True)

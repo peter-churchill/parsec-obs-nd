@@ -150,7 +150,12 @@ def load_surface(site, hours):
     if os.path.exists(f):
         df = pd.read_csv(f, index_col=0, parse_dates=True)
         df.index = pd.DatetimeIndex(df.index).tz_localize(None) - pd.Timedelta("1h")   # FMI stamps hour end
-        df = pd.DataFrame({"T": df["TA_PT1H_AVG"] + 273.15, "RH": df["RH_PT1H_AVG"], "P": df["PA_PT1H_AVG"] * 100.0})
+        T = df["TA_PT1H_AVG"] + 273.15
+        if "PA_PT1H_AVG" in df:
+            P = df["PA_PT1H_AVG"] * 100.0
+        else:                                    # 10-min fallback: sea-level pressure reduced to the station
+            P = df["P_SEA"] * 100.0 * np.exp(-G0 * SITE_COORDS[site][2] / (287.05 * (T + 0.0065 * SITE_COORDS[site][2] / 2)))
+        df = pd.DataFrame({"T": T, "RH": df["RH_PT1H_AVG"], "P": P})
         return _hourly(df, hours), "fmi_station"
     return None, None
 

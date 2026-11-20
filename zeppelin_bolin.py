@@ -17,8 +17,9 @@ for cloud-base values. From data/bolin/zeppelin-cloud-aerosol-1_part1.nc4 and _p
                                      first reaches 0.5, the corrected residual number and the FM-120
                                      droplet number, for comparison with PARSEC's activation radius.
 
-The residual correction (measured / (enrichment_factor x transmission_efficiency_factor)) is checked by
-printing the residual number against the FM-120 droplet number with and without it.
+The published residual distributions are already corrected for the GCVI enrichment and transmission (their
+number is ~1.4 x the FM-120 droplet number; dividing again by the factors gives ~0.05 x), so they are used
+as they are; --apply-ef divides by the factors anyway.
 
 Examples
 --------
@@ -71,6 +72,11 @@ def d50(af, d):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--no-thermo", action="store_true", help="do not write T0/P0 into the inputs file")
+    ap.add_argument("--apply-ef", action="store_true",
+                    help="divide the residual distribution by enrichment x transmission (off: the published "
+                         "distributions are already corrected; raw residual number is ~1.4 x FM-120, corrected 0.05 x)")
+    ap.add_argument("--zero-mean-w", action="store_true",
+                    help="write w_mean = 0 (sigma_w only), for when the station's mean w is terrain/tilt-driven")
     a = ap.parse_args()
 
     inp = os.path.join(HERE, "inputs", "zeppelin_parcel_inputs.nc")
@@ -92,14 +98,23 @@ def main():
     for h, s in g:
         W[pos[h], :len(s)] = s.values
     wm, sw, n = g.mean().reindex(hours), g.std().reindex(hours), g.size().reindex(hours).fillna(0)
+    U = pd.Series(p1["wind_speed"].values.astype(float), index=hr1)
+    U = U[U.index.isin(hours)].groupby(level=0).mean().reindex(hours)
+    m = wm.notna() & U.notna()
+    if m.sum() > 10:
+        slope = np.polyfit(U[m], wm[m], 1)
+        print(f"updraft vs horizontal wind (hourly means): r = {np.corrcoef(U[m], wm[m])[0, 1]:.2f}, "
+              f"w = {slope[0]:.3f} U + {slope[1]:.2f}; median w/U = {np.median(wm[m] / U[m].clip(lower=0.5)):.3f}")
+    wm_out = wm * 0 if a.zero_mean_w else wm
     os.makedirs(os.path.join(HERE, "updrafts"), exist_ok=True)
     xr.Dataset({"w": (("hour", "sample"), W, {"units": "m s-1"}),
-                "w_mean": ("hour", wm.values, {"units": "m s-1"}),
+                "w_mean": ("hour", wm_out.values, {"units": "m s-1"}),
+                "w_mean_station": ("hour", wm.values, {"units": "m s-1", "long_name": "hourly mean station w"}),
                 "sigma_w": ("hour", sw.where(n >= 4).values, {"units": "m s-1",
                             "long_name": "std of 5-7 min mean vertical wind in the hour (lower bound)"}),
                 "n_samples": ("hour", n.values.astype(int))},
                coords={"hour": hours.values},
-               attrs={"w_source": "zeppelin_station_5min", "source": "Karlsson et al. 2021, Bolin Centre"}
+               attrs={"w_source": "zeppelin_station_5min" + ("_sigma_only" if a.zero_mean_w else ""), "source": "Karlsson et al. 2021, Bolin Centre"}
                ).to_netcdf(os.path.join(HERE, "updrafts", "zeppelin_w_cloudbase.nc"))
     print(f"updraft: {int((n > 0).sum())} hours with w, median {int(n[n > 0].median())} samples/h; "
           f"w_mean median {wm.median():.2f}, sigma_w median {sw.median():.2f} m/s, "
@@ -129,7 +144,7 @@ def main():
     res = p1["aerosol_particle_size_distribution"].values.astype(float)
     ef = p1["enrichment_factor"].values.astype(float)
     te = p1["transmission_efficiency_factor"].values.astype(float)
-    corr = ef * te
+    corr = ef * te if a.apply_ef else np.ones_like(ef)
     sel = cl & np.isin(hr1, hours) & np.isfinite(corr) & (corr > 0)
     print(f"activation: {cl.sum()} residual scans, {sel.sum()} in the cloud hours with EF x TE")
     res_c = res[sel] / corr[sel, None]
@@ -141,7 +156,8 @@ def main():
     n_cor = np.nansum(res_c * dlog(d1), axis=1)
     ok = (n_fm > 1) & (n_raw > 0)
     print(f"   residual number / FM-120 number (median over {ok.sum()} scans): raw {np.median(n_raw[ok] / n_fm[ok]):.2f}, "
-          f"/ (EF x TE) {np.median(n_cor[ok] / n_fm[ok]):.2f}  <- should be near 1 if the correction is right")
+          f"/ (EF x TE) {np.median(n_raw[ok] / (ef * te)[sel][ok] / n_fm[ok]):.2f}; using "
+          f"{'corrected' if a.apply_ef else 'raw (already corrected in the dataset)'}")
 
     p2 = xr.open_dataset(P2)
     t2 = pd.DatetimeIndex(p2["time"].values)

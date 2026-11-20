@@ -107,9 +107,11 @@ def _samples_arm(ds):
     """(start, end, ss_set, ss_eff, n) samples from an ARM CCN file (one or two columns)."""
     s, e = arm_bounds(ds)
     out = []
-    for v in ds.data_vars:
-        if v.startswith("qc_") or not re.match(r"(?i)^n_ccn", v) or ds[v].dims != ("time",):
-            continue
+    cands = [v for v in ds.data_vars
+             if not v.startswith("qc_") and re.match(r"(?i)^n_ccn", v) and ds[v].dims == ("time",)]
+    if "N_CCN" in cands:                 # LASIC also has N_CCN_reduced etc.: use the standard one only
+        cands = ["N_CCN"]
+    for v in cands:
         suf = v[5:]
         set_v = next((c for c in (f"supersaturation_setpoint{suf}", "supersaturation_setpoint") if c in ds), None)
         eff_v = next((c for c in (f"supersaturation_calculated{suf}", "supersaturation_calculated") if c in ds), None)
@@ -158,7 +160,7 @@ def read_ebas(site):
                     print(f"    no CCN variable in {os.path.basename(f)[:60]}")
                     continue
                 x = ds[v].where(ebas_valid(ds, v))
-                ssdim = next((d for d in x.dims if d != "time" and "supersat" in d.lower()), None)
+                ssdim = next((d for d in x.dims if d != "time" and ("supersat" in d.lower() or d.upper() == "SS")), None)
                 for d in [d for d in x.dims if d not in ("time", ssdim)]:
                     x = x.isel({d: 0})
                 if ssdim is not None:

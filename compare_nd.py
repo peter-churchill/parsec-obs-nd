@@ -13,7 +13,10 @@
    hour's updraft PDF like Nd) against the observed integral activation diameter (results/zeppelin_activation.nc).
 4. results/nd_parcel_vs_obs.png: parcel against observed Nd, one panel per weighting.
 
-Hours with placeholder T0/P0 are left out of the summary (kept in the hours file, flagged).
+Hours with placeholder T0/P0 are left out of the summary (kept in the hours file, flagged). Every hour is also
+classed by coupling (in-cloud station; coupled: |cloud base - surface LCL| <= 300 m; decoupled; unknown where there
+is no surface met) and by cloud-base temperature T0 (warm >= 0 C; supercooled -10..0 C; cold < -10 C), with
+summaries over all sites and per site (flux weighting).
 
 Examples
 --------
@@ -33,6 +36,37 @@ import xarray as xr
 HERE = os.path.dirname(os.path.abspath(__file__))
 RES = os.path.join(HERE, "results")
 BOUNDS = {"puijo": (0.23, 0.70), "pallas": (0.23, 0.70)}
+COUPLED_M = 300.0                                   # |cloud base - surface LCL| for "coupled", as in build_thermo.py
+TEMP_EDGES = (263.15, 273.15)                       # cold < -10 C <= supercooled < 0 C <= warm
+
+
+def classes(site, hours):
+    """Per hour: coupling class (in-cloud station / coupled / decoupled / unknown) and cloud-base temperature
+    class (warm / supercooled / cold), from inputs/<site>_parcel_inputs.nc (cbh_minus_lcl, T0)."""
+    sys.path.insert(0, HERE)
+    from sites import SITES
+    p = os.path.join(HERE, "inputs", f"{site}_parcel_inputs.nc")
+    out = pd.DataFrame({"coupling": "unknown", "temp": "unknown", "T0": np.nan, "cbh_minus_lcl": np.nan},
+                       index=pd.DatetimeIndex(hours))
+    if not os.path.exists(p):
+        return out
+    with xr.open_dataset(p) as d:
+        h = pd.DatetimeIndex(d["hour"].values)
+        T0 = pd.Series(d["T0"].values.astype(float), index=h)
+        dz = pd.Series(d["cbh_minus_lcl"].values.astype(float) if "cbh_minus_lcl" in d else np.nan, index=h)
+        src = pd.Series(d["thermo_source"].values.astype(str), index=h)
+    T0, dz, src = T0.reindex(out.index), dz.reindex(out.index), src.reindex(out.index)
+    out["T0"], out["cbh_minus_lcl"] = T0.values, dz.values
+    if SITES[site]["kind"] == "insitu":
+        out["coupling"] = "in-cloud station"
+    else:
+        out.loc[dz.abs() <= COUPLED_M, "coupling"] = "coupled"
+        out.loc[dz.abs() > COUPLED_M, "coupling"] = "decoupled"
+    T0 = T0.where(src != "placeholder")
+    out.loc[T0 >= TEMP_EDGES[1], "temp"] = "warm (>= 0 C)"
+    out.loc[(T0 >= TEMP_EDGES[0]) & (T0 < TEMP_EDGES[1]), "temp"] = "supercooled (-10..0 C)"
+    out.loc[T0 < TEMP_EDGES[0], "temp"] = "cold (< -10 C)"
+    return out
 
 
 def run_weighting(site, a):
@@ -76,6 +110,9 @@ def collect(files):
                                "thermo_source": d["thermo_source"].values.astype(str),
                                "w_source": d["w_source"].values.astype(str),
                                "frac_w_outside": d["frac_w_outside"].values})
+        c = classes(site, df["hour"])
+        df["coupling"], df["temp"] = c["coupling"].values, c["temp"].values
+        df["T0"], df["cbh_minus_lcl"] = c["T0"].values, c["cbh_minus_lcl"].values
         df.insert(0, "weighting", wt)
         df.insert(0, "variant", tag)
         df.insert(0, "site", site)
@@ -187,13 +224,23 @@ def main():
     by_site = summarise(t, ["site", "variant", "weighting"])
     by_tier = summarise(t[t["variant"] == "obs"], ["weighting", "tier"])
     by_thermo = summarise(t[t["variant"] == "obs"], ["weighting", "thermo"])
+    ob = t[t["variant"] == "obs"]
+    by_coup = summarise(ob, ["weighting", "coupling"])
+    by_temp = summarise(ob, ["weighting", "temp"])
+    by_site_coup = summarise(ob[ob["weighting"] == "flux"], ["site", "coupling"])
+    by_site_temp = summarise(ob[ob["weighting"] == "flux"], ["site", "temp"])
     with open(os.path.join(RES, "nd_comparison_summary.csv"), "w") as fh:
-        for name, d in (("by_site", by_site), ("by_composition_tier", by_tier), ("by_thermo_source", by_thermo)):
+        for name, d in (("by_site", by_site), ("by_composition_tier", by_tier), ("by_thermo_source", by_thermo),
+                        ("by_coupling", by_coup), ("by_temperature", by_temp),
+                        ("by_site_and_coupling_flux", by_site_coup), ("by_site_and_temperature_flux", by_site_temp)):
             fh.write(f"# {name}\n")
             d.to_csv(fh, index=False, float_format="%.3g")
     pd.set_option("display.width", 200)
     fmt = {c: "{:.2f}".format for c in ("ratio_median", "ratio_q25", "ratio_q75", "r_log")}
-    for name, d in (("By site", by_site), ("By composition tier", by_tier), ("By cloud-base T/P source", by_thermo)):
+    for name, d in (("By site", by_site), ("By composition tier", by_tier), ("By cloud-base T/P source", by_thermo),
+                    ("By coupling (|cloud base - LCL| <= 300 m)", by_coup), ("By cloud-base temperature", by_temp),
+                    ("By site and coupling, flux weighting", by_site_coup),
+                    ("By site and cloud-base temperature, flux weighting", by_site_temp)):
         print(f"\n{name} (parcel / observed Nd):")
         print(d.to_string(index=False, formatters=fmt, float_format="{:.0f}".format))
     zeppelin_activation(a)

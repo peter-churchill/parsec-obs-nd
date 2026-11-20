@@ -23,12 +23,19 @@ summary.csv (one row per site: D_Delta, S(D_Delta), S(100 nm), D_act with interv
 The observational screens are those of the inputs (build_parcel_inputs.py); the profiles therefore cover the hours
 with a spectrum and a parcel result, which can differ slightly from the published quicklook.
 
+--split coupling / temperature repeats everything per coupling class (coupled: |cloud base - surface LCL| <= 300 m,
+decoupled, in-cloud station) or cloud-base temperature class (warm >= 0 C, supercooled -10..0 C, cold < -10 C),
+into results/susceptibility_parcel/<split>_<group>/, with summary_<split>.csv and split_<split>.png comparing
+the groups site by site. Sites or groups with fewer than --min-hours (30) matched hours are skipped.
+
 Needs OBS_REPO (arm_ena_nd_pnsd.py and the built files) and scipy.
 
 Examples
 --------
 python susceptibility_parcel.py --n-boot 200
 python susceptibility_parcel.py --sites ena sgp hyytiala --n-boot 50
+python susceptibility_parcel.py --split coupling --n-boot 200
+python susceptibility_parcel.py --split temperature --n-boot 200
 """
 import argparse
 import glob
@@ -116,7 +123,7 @@ def n_above_at(ccn, diam, dvals):
     return out
 
 
-def site_analysis(site, a, aq):
+def site_analysis(site, a, aq, group=None):
     nd_files = {wt: os.path.join(HERE, "results", f"{site}_parcel_nd_obs_{wt}.nc") for wt in ("pdf", "flux")}
     if not all(os.path.exists(f) for f in nd_files.values()):
         print(f"{site}: no weighted parcel results (run compare_nd.py first)")
@@ -132,14 +139,19 @@ def site_analysis(site, a, aq):
     hours = nd["obs"].index
     keep = (thermo != "placeholder") & nd["obs"].gt(0) & nd["parcel_pdf"].gt(0) & nd["parcel_flux"].gt(0)
     keep &= hours.isin(ccn_df.index)
+    if group is not None:
+        from compare_nd import classes
+        c = classes(site, hours)
+        keep &= (c[group[0]] == group[1]).values
     hours = hours[keep.values]
-    if len(hours) < 30:
-        print(f"{site}: only {len(hours)} matched hours; skipped")
+    if len(hours) < a.min_hours:
+        print(f"{site}: only {len(hours)} matched hours{'' if group is None else ' (' + group[1] + ')'}; skipped")
         return None
     ccn = ccn_df.loc[hours].to_numpy(float)
     times = hours.values
     prof = pd.DataFrame({"D_nm": diam})
-    row = dict(site=site, regime=SITES[site]["regime"], kind=SITES[site]["kind"], hours=len(hours),
+    row = dict(site=site, group="all" if group is None else group[1], regime=SITES[site]["regime"],
+               kind=SITES[site]["kind"], hours=len(hours),
                days=len(np.unique(hours.normalize())))
     i100 = int(np.argmin(np.abs(diam - 100)))
     for key in ("obs", "parcel_pdf", "parcel_flux"):
@@ -175,6 +187,7 @@ def site_analysis(site, a, aq):
         row.update(Dact_obs_median=o.median(), Dact_obs_q25=o.quantile(.25), Dact_obs_q75=o.quantile(.75))
     os.makedirs(OUT, exist_ok=True)
     prof.to_csv(os.path.join(OUT, f"{site}_profiles.csv"), index=False, float_format="%.4g")
+    print(f"   [{row['group']}]", end=" ")
     print(f"{site:16s} {len(hours):5d} h  D_Delta obs {row['Dd_obs']:5.0f}  parcel pdf {row['Dd_parcel_pdf']:5.0f} "
           f"flux {row['Dd_parcel_flux']:5.0f} nm | S(D_Delta) obs {row['S_Dd_obs']:.2f} pdf {row['S_Dd_parcel_pdf']:.2f} "
           f"flux {row['S_Dd_parcel_flux']:.2f} | D_act pdf {row['Dact_pdf_median']:.0f} (closure-equiv. "
@@ -272,12 +285,55 @@ def plots(rows, profs):
     print(f"-> {os.path.relpath(OUT, HERE)}/profiles.png, s_at_ddelta.png, ddelta_vs_dact.png")
 
 
+SPLITS = {"coupling": ("coupling", ["coupled", "decoupled", "in-cloud station"]),
+          "temperature": ("temp", ["warm (>= 0 C)", "supercooled (-10..0 C)", "cold (< -10 C)"])}
+
+
+def split_figure(t, split, path):
+    """S(D_Delta) observed (filled) and parcel flux (open) per site and group."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    groups = SPLITS[split][1]
+    col = dict(zip(groups, ["#1f77b4", "#d62728", "#2ca02c"]))
+    sites = sorted(t["site"].unique())
+    x = {s: i for i, s in enumerate(sites)}
+    fig, axs = plt.subplots(2, 1, figsize=(max(8, 0.55 * len(sites)), 7.5), sharex=True)
+    for g in groups:
+        u = t[t["group"] == g]
+        off = (groups.index(g) - 1) * 0.22
+        xs = np.array([x[s] for s in u["site"]]) + off
+        axs[0].plot(xs, u["S_Dd_obs"], "o", color=col[g], mec="k", ms=7, label=f"{g}: observed")
+        axs[0].plot(xs, u["S_Dd_parcel_flux"], "o", mfc="white", mec=col[g], mew=1.5, ms=7, label=f"{g}: parcel (flux)")
+        axs[1].plot(xs, u["Dd_obs"] / u["Dact_flux_closure"], "s", color=col[g], mec="k", ms=6, label=g)
+    axs[0].axhline(0, color="0.6", lw=0.6)
+    axs[0].axhline(1, color="0.6", lw=0.6, ls=":")
+    axs[0].set_ylabel("S(D$_\\Delta$)")
+    axs[0].legend(fontsize=7, ncol=3)
+    axs[1].axhline(1, color="k", lw=0.8)
+    axs[1].set_yscale("log")
+    axs[1].set_ylabel("observed D$_\\Delta$ / parcel activation diameter")
+    axs[1].legend(fontsize=7, ncol=3)
+    axs[1].set_xticks(range(len(sites)))
+    axs[1].set_xticklabels(sites, rotation=60, ha="right", fontsize=8)
+    for ax in axs:
+        ax.grid(alpha=0.3)
+    fig.suptitle(f"Split by {split}: susceptibility at the closure diameter and closure vs activation diameter")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+
+
 def main():
+    global OUT
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sites", nargs="*")
     ap.add_argument("--obs-repo", default=os.environ.get("OBS_REPO"))
     ap.add_argument("--rundir", default=os.path.join(HERE, "runs"))
     ap.add_argument("--n-boot", type=int, default=200)
+    ap.add_argument("--split", choices=["none", "coupling", "temperature"], default="none",
+                    help="also compute everything per coupling class (|cloud base - LCL| <= 300 m) or per cloud-base "
+                         "temperature class, into results/susceptibility_parcel/<split>_<group>/")
+    ap.add_argument("--min-hours", type=int, default=30, help="minimum matched hours per site (and group)")
     a = ap.parse_args()
     if not a.obs_repo:
         ap.error("give --obs-repo or set OBS_REPO")
@@ -285,18 +341,33 @@ def main():
     import arm_ena_nd_pnsd as aq
     sites = a.sites or sorted({os.path.basename(f).split("_parcel_nd_obs_")[0]
                                for f in glob.glob(os.path.join(HERE, "results", "*_parcel_nd_obs_pdf.nc"))})
-    rows, profs = [], []
-    for s in sites:
-        r = site_analysis(s, a, aq)
-        if r:
-            rows.append(r[0])
-            profs.append(r[1])
-    if not rows:
-        raise SystemExit("nothing to compare")
-    os.makedirs(OUT, exist_ok=True)
-    pd.DataFrame(rows).to_csv(os.path.join(OUT, "summary.csv"), index=False, float_format="%.4g")
-    print(f"-> {os.path.relpath(OUT, HERE)}/summary.csv")
-    plots(rows, profs)
+    base = OUT
+    runs = [(None, base)] if a.split == "none" else \
+        [((SPLITS[a.split][0], g), os.path.join(base, f"{a.split}_{g.split(' ')[0]}")) for g in SPLITS[a.split][1]]
+    allrows = []
+    for group, out in runs:
+        OUT = out
+        if group is not None:
+            print(f"\n=== {a.split}: {group[1]} ===")
+        rows, profs = [], []
+        for s in sites:
+            r = site_analysis(s, a, aq, group)
+            if r:
+                rows.append(r[0])
+                profs.append(r[1])
+        if not rows:
+            print("   nothing for this group")
+            continue
+        os.makedirs(OUT, exist_ok=True)
+        pd.DataFrame(rows).to_csv(os.path.join(OUT, "summary.csv"), index=False, float_format="%.4g")
+        print(f"-> {os.path.relpath(OUT, HERE)}/summary.csv")
+        plots(rows, profs)
+        allrows += rows
+    if a.split != "none" and allrows:
+        t = pd.DataFrame(allrows)
+        t.to_csv(os.path.join(base, f"summary_{a.split}.csv"), index=False, float_format="%.4g")
+        split_figure(t, a.split, os.path.join(base, f"split_{a.split}.png"))
+        print(f"-> {os.path.relpath(base, HERE)}/summary_{a.split}.csv, split_{a.split}.png")
 
 
 if __name__ == "__main__":

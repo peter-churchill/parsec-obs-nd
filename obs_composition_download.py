@@ -143,7 +143,14 @@ def ebas_part(a, manifest):
     if not os.path.exists(inv):
         print("EBAS: results/composition_inventory.csv missing; run composition_search.py --no-arm first.")
         return
-    t = pd.read_csv(inv)
+    try:
+        t = pd.read_csv(inv)
+    except pd.errors.EmptyDataError:
+        print("EBAS: results/composition_inventory.csv is empty; rerun composition_search.py --no-arm.")
+        return
+    if "source" not in t or not (t.source == "EBAS").any():
+        print("EBAS: no EBAS rows in results/composition_inventory.csv; rerun composition_search.py --no-arm.")
+        return
     t = t[(t.source == "EBAS") & (t.hours_covered > 0) & t.category.isin(a.categories_ebas)]
     files = t.drop_duplicates("dataset")
     print(f"\nEBAS: {len(t)} site-dataset rows, {len(files)} distinct files", flush=True)

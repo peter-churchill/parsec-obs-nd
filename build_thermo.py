@@ -86,6 +86,12 @@ def interp_at(parts, hours, z_target):
 
 
 MEASURED = ("built_file_cloud_base", "zeppelin_station")       # never replaced
+# NDROP built files whose cloud-base T/p sit one station height too low: at SGP (315 m) and LASIC (340 m) they
+# are 2-3 K warmer and 36-39 hPa higher than the surface dry adiabat to the same cloud base (coupled hours),
+# i.e. as if cloud base height had been taken above sea level; at ENA and the EPCAPE pier (near sea level) the
+# two agree within 0.5 K and 6 hPa. Their built values are kept as T_built/P_built but replaced like any
+# unmeasured hour.
+BUILT_SUSPECT = ("sgp", "lasic")
 # surface met measured at another altitude than the site (m a.s.l.): Mt Soledad uses the pier MET
 MET_ALT = {"epcmetM1.b1": 10.0}
 G_CP = G0 / 1004.0                                              # dry-adiabatic lapse rate, K m-1
@@ -151,10 +157,11 @@ def load_surface(site, hours):
         df = pd.read_csv(f, index_col=0, parse_dates=True)
         df.index = pd.DatetimeIndex(df.index).tz_localize(None) - pd.Timedelta("1h")   # FMI stamps hour end
         T = df["TA_PT1H_AVG"] + 273.15
-        if "PA_PT1H_AVG" in df:
-            P = df["PA_PT1H_AVG"] * 100.0
-        else:                                    # 10-min fallback: sea-level pressure reduced to the station
-            P = df["P_SEA"] * 100.0 * np.exp(-G0 * SITE_COORDS[site][2] / (287.05 * (T + 0.0065 * SITE_COORDS[site][2] / 2)))
+        # FMI pressure (PA_PT1H_AVG, p_sea) is reduced to sea level: back to the station's altitude
+        # (Kenttarova surface p came out 38 hPa above the Cloudnet model before this)
+        psl = df["PA_PT1H_AVG"] if "PA_PT1H_AVG" in df else df["P_SEA"]
+        z = SITE_COORDS[site][2]
+        P = psl * 100.0 * np.exp(-G0 * z / (287.05 * (T + 0.0065 * z / 2)))
         df = pd.DataFrame({"T": T, "RH": df["RH_PT1H_AVG"], "P": P})
         return _hourly(df, hours), "fmi_station"
     return None, None
@@ -248,6 +255,12 @@ def build_site(site, dry_run=False, coupled_m=300.0):
              f"{int(np.sum(coupled & have_s))} of {have_s.sum()}"))
 
     src = ds["thermo_source"].values.astype(object).copy()
+    if site in BUILT_SUSPECT and "T_built" not in ds:
+        ds["T_built"] = ("hour", np.where(src == "built_file_cloud_base", ds["T0"].values, np.nan), {"units": "K"})
+        ds["P_built"] = ("hour", np.where(src == "built_file_cloud_base", ds["P0"].values, np.nan), {"units": "Pa"})
+    if site in BUILT_SUSPECT:
+        src[src == "built_file_cloud_base"] = "placeholder"
+        print("   built-file cloud-base T/p not used (BUILT_SUSPECT): replaced like unmeasured hours")
     meas = np.isin(src, MEASURED)
     T0, P0 = ds["T0"].values.copy(), ds["P0"].values.copy()
     if kind == "insitu":
@@ -268,12 +281,14 @@ def build_site(site, dry_run=False, coupled_m=300.0):
         print(f"   surface - model ({int(both.sum())} h): T {np.nanmedian(T_s[both] - T_e[both]):+.1f} K "
               f"(IQR {np.nanpercentile(T_s[both] - T_e[both], 25):+.1f}..{np.nanpercentile(T_s[both] - T_e[both], 75):+.1f}), "
               f"p {np.nanmedian(P_s[both] - P_e[both]) / 100:+.0f} hPa")
-    mb = (ds["thermo_source"].values == "built_file_cloud_base")
+    Tb = ds["T_built"].values if "T_built" in ds else np.where(ds["thermo_source"].values == "built_file_cloud_base", ds["T0"].values, np.nan)
+    Pb = ds["P_built"].values if "P_built" in ds else np.where(ds["thermo_source"].values == "built_file_cloud_base", ds["P0"].values, np.nan)
+    mb = np.isfinite(Tb)
     for name, TT, PP, hv in (("surface", T_s, P_s, have_s & coupled), ("model", T_e, P_e, have_e)):
         m = mb & hv
         if m.sum() >= 10:
-            print(f"   {name} - measured cloud base ({m.sum()} h): T {np.nanmedian(TT[m] - ds['T0'].values[m]):+.1f} K, "
-                  f"p {np.nanmedian(PP[m] - ds['P0'].values[m]) / 100:+.0f} hPa")
+            print(f"   {name} - built-file cloud base ({m.sum()} h): T {np.nanmedian(TT[m] - Tb[m]):+.1f} K, "
+                  f"p {np.nanmedian(PP[m] - Pb[m]) / 100:+.0f} hPa")
     print("   T0/P0 sources: " + ", ".join(f"{k} {v}" for k, v in pd.Series(src).value_counts().items()))
     if dry_run:
         return

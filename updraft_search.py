@@ -3,7 +3,8 @@
 
 ARM sites (ENA, SGP, LASIC, EPCAPE, Bankhead): the vertical-velocity statistics VAP (dlprofwstats4news,
 w variance / skewness profiles) and the raw vertical stare (dlfpt), queried with the ARM Live API.
-Cloudnet sites: the Cloudnet "doppler-lidar" product (vertical stare, radial velocity v) from the public
+Cloudnet sites (the ACTRIS cloud remote sensing portal): doppler-lidar (vertical stare v), epsilon-lidar and
+epsilon-radar (turbulent dissipation rate), radar (Doppler velocity), and raw Halo lidar uploads, from the public
 Cloudnet API. The Cloudnet site id is matched from a list of aliases (Puijo -> kuopio, Pallas -> pallas /
 kenttarova, ...); unmatched sites are reported.
 
@@ -61,7 +62,19 @@ def get_json(url, params):
         return json.loads(r.read().decode())
 
 
-def cloudnet_part(sites, rows):
+PRODUCTS = ["doppler-lidar", "epsilon-lidar", "radar", "epsilon-radar"]
+
+
+def _days_of(files, days):
+    have = {pd.Timestamp(f["measurementDate"]) for f in files}
+    mb = sum(float(f.get("size", 0)) for f in files if pd.Timestamp(f["measurementDate"]) in days) / 1e6
+    return len(have & days), mb
+
+
+def cloudnet_part(sites, rows, products=PRODUCTS):
+    """ACTRIS cloud remote sensing (Cloudnet portal): processed products with vertical velocity or turbulence
+    (doppler-lidar v, epsilon-lidar / epsilon-radar dissipation rate, radar Doppler velocity), plus raw
+    Halo Doppler-lidar uploads that have not been processed into the doppler-lidar product."""
     try:
         known = {s["id"] for s in get_json(f"{CLOUDNET}/sites", {})}
     except Exception as e:                                                          # noqa: BLE001
@@ -76,24 +89,30 @@ def cloudnet_part(sites, rows):
             print(f"  {site:18s} no Cloudnet site id among {CLOUDNET_ALIASES.get(site, [site])}")
             continue
         d0, d1 = min(days).strftime("%Y-%m-%d"), max(days).strftime("%Y-%m-%d")
-        best = None
-        for cid in cands:
-            try:
-                files = get_json(f"{CLOUDNET}/files", {"site": cid, "product": "doppler-lidar",
-                                                       "dateFrom": d0, "dateTo": d1})
-            except Exception as e:                                                  # noqa: BLE001
-                print(f"  {site:18s} {cid}: query failed: {str(e)[:80]}")
+        line = []
+        for prod in products + ["raw-halo"]:
+            best = None
+            for cid in cands:
+                try:
+                    if prod == "raw-halo":
+                        files = get_json(f"{CLOUDNET}/raw-files", {"site": cid, "instrument": "halo-doppler-lidar",
+                                                                    "dateFrom": d0, "dateTo": d1})
+                    else:
+                        files = get_json(f"{CLOUDNET}/files", {"site": cid, "product": prod,
+                                                               "dateFrom": d0, "dateTo": d1})
+                except Exception as e:                                              # noqa: BLE001
+                    continue
+                n, mb = _days_of(files, days)
+                if best is None or n > best[1]:
+                    best = (cid, n, mb)
+            if best is None:
                 continue
-            have = {pd.Timestamp(f["measurementDate"]) for f in files}
-            n = len(have & days)
-            mb = sum(float(f.get("size", 0)) for f in files if pd.Timestamp(f["measurementDate"]) in days) / 1e6
-            if best is None or n > best[1]:
-                best = (cid, n, mb)
-        if best:
             cid, n, mb = best
-            print(f"  {site:18s} cloudnet:{cid:12s} {n:4d}/{len(days):4d} cloud days, {mb:8.0f} MB")
-            rows.append(dict(site=site, source="Cloudnet", dataset=f"{cid}/doppler-lidar", cloud_days=len(days),
-                             days_with_files=n, frac=n / len(days), mb=mb))
+            line.append(f"{prod} {n}")
+            if n:
+                rows.append(dict(site=site, source="Cloudnet", dataset=f"{cid}/{prod}", cloud_days=len(days),
+                                 days_with_files=n, frac=n / len(days), mb=mb))
+        print(f"  {site:18s} ({len(days):4d} cloud days, {'/'.join(cands)}): " + ", ".join(line), flush=True)
 
 
 def arm_part(rows):
@@ -139,7 +158,7 @@ def main():
         print("ARM Doppler lidar")
         arm_part(rows)
     if not a.no_cloudnet:
-        print("\nCloudnet doppler-lidar")
+        print("\nCloudnet / ACTRIS: days with files per product")
         cloudnet_part([s for s in SITES if s not in ("ena", "sgp", "lasic", "epcape_pier", "epcape_soledad")], rows)
     if not rows:
         return

@@ -99,6 +99,7 @@ def main():
     src.add_argument("--sigma-w", type=float, help="one sigma_w (m s-1) for all hours")
     ap.add_argument("--weighting", choices=["pdf", "flux"], default="pdf")
     ap.add_argument("--min-samples", type=int, default=30, help="minimum positive w samples per hour")
+    ap.add_argument("--sigma-only", action="store_true", help="ignore w samples in --w-file, use sigma_w / w_mean")
     ap.add_argument("--out", help="default results/<site>_parcel_nd_<tag>.nc")
     a = ap.parse_args()
 
@@ -128,15 +129,14 @@ def main():
             if k is None:
                 continue
             row = nd.iloc[i].to_numpy()
-            if "w" in wf:
-                w = wf["w"].values[k]
-                w = w[np.isfinite(w) & (w > 0)]
-                if len(w) < a.min_samples:
-                    continue
+            hs = str(wf["hour_source"].values[k]) if "hour_source" in wf else str(wf.attrs.get("w_source", ""))
+            w = wf["w"].values[k] if ("w" in wf and not a.sigma_only) else np.array([])
+            w = w[np.isfinite(w) & (w > 0)]
+            if len(w) >= a.min_samples:                 # samples where the hour has enough, else the Gaussian
                 out_nd[i] = weighted(nd_of_w(w, wgrid, row), w, a.weighting)
                 n_used[i] = len(w)
                 clamped[i] = np.mean((w < wgrid[0]) | (w > wgrid[-1]))
-                wsrc[i] = str(wf.attrs.get("w_source", "samples"))
+                wsrc[i] = f"{hs}_samples"
             elif "sigma_w" in wf:
                 s = float(wf["sigma_w"].values[k])
                 m = float(wf["w_mean"].values[k]) if "w_mean" in wf else 0.0
@@ -149,7 +149,7 @@ def main():
                 f = wq if a.weighting == "flux" else 1
                 out_nd[i] = np.sum(v * pq * f) / np.sum(pq * f)
                 clamped[i] = pq[(wq < wgrid[0]) | (wq > wgrid[-1])].sum()
-                wsrc[i] = str(wf.attrs.get("w_source", "sigma_w"))
+                wsrc[i] = f"{hs}_sigma"
         tag = f"{os.path.splitext(os.path.basename(a.w_file))[0]}_{a.weighting}"
 
     hix = nd.index.to_numpy()

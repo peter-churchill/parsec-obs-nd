@@ -53,7 +53,10 @@ CLOUDNET_SITES = {"hyytiala": "hyytiala", "kenttarova": "kenttarova", "granada":
 # and Z on a 30-s grid with the target classification, much smaller than the level-1 radar files)
 CLOUDNET_RADAR_SITES = {"norunda": "norunda", "mace-head": "mace-head", "palaiseau": "palaiseau",
                         "schneefernerhaus": "schneefernerhaus", "ny-alesund": "ny-alesund",
-                        "zeppelin": "ny-alesund", "pallas": "kenttarova"}
+                        "zeppelin": "ny-alesund", "pallas": "kenttarova",
+                        # lidar sites too: radar fills the hours without lidar and gives a lidar/radar comparison
+                        "hyytiala": "hyytiala", "granada": "granada", "melpitz": "melpitz",
+                        "bucharest": "bucharest", "cabauw": "cabauw", "kenttarova": "kenttarova"}
 
 
 def arm(a):

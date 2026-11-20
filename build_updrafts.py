@@ -140,7 +140,7 @@ def cloudnet_site(site, hours, cbh_h, a):
     pos = {h: i for i, h in enumerate(hours)}
     rng = np.random.default_rng(0)
     for h, s in g:
-        x = s.values
+        x = s.values - s.values.mean()          # mean below cloud base is ~0; Cloudnet means are biased (see main)
         if len(x) > a.max_samples:
             x = rng.choice(x, a.max_samples, replace=False)
         W[pos[h], :len(x)] = x
@@ -171,9 +171,13 @@ def radar_site(site, hours, cbh_h, a):
                 alt = float(np.nanmedian(ds["altitude"].values))
                 z = ds["height"].values.astype(float) - alt
                 cb = cbh_h.reindex(hr[keep]).values
+                cat = ds["category_bits"].values[keep].astype(np.int64)
+                if not np.isfinite(cb).any():           # in-cloud stations: lowest cloud-droplet gate per profile
+                    liq = (cat & 1) > 0
+                    first = np.where(liq.any(axis=1), np.argmax(liq, axis=1), -1)
+                    cb = np.where(first >= 0, z[np.clip(first, 0, None)], np.nan)
                 h = z[None, :]
                 m = (h >= cb[:, None]) & (h <= cb[:, None] + a.radar_depth)
-                cat = ds["category_bits"].values[keep].astype(np.int64)
                 m &= (cat & 1) > 0
                 m &= (cat & 2) == 0
                 m &= ds["Z"].values[keep] < a.zmax
@@ -216,6 +220,32 @@ def fallback_site(site, hours):
     return out, None, f"regime_fallback_{'+'.join(FALLBACK[site])}"
 
 
+def combine(lid, rad, hours):
+    """Lidar (below cloud base) where it has >= 30 profiles in the hour, else radar (above cloud base) with
+    >= 20 30-s steps. Both sigma_w are kept for the hours that have both."""
+    if lid is None and rad is None:
+        return None
+    if rad is None:
+        return lid
+    if lid is None:
+        return rad
+    L, W, _ = lid
+    R = rad[0]
+    okL = L["n"].fillna(0) >= 30
+    okR = R["n"].fillna(0) >= 20
+    out = L.copy()
+    useR = ~okL & okR
+    for c in ("sigma_w", "w_mean", "n", "sigma_w_cb"):
+        out.loc[useR, c] = R.loc[useR, c]
+    out["nmin"] = np.where(useR, 20, 30)
+    out["hour_source"] = np.where(okL, "lidar", np.where(okR, "radar", "none"))
+    out["sigma_w_lidar"] = L.sigma_w.where(okL)
+    out["sigma_w_radar"] = R.sigma_w.where(okR)
+    if W is not None:
+        W[useR.values] = np.nan
+    return out, W, "lidar+radar"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sites", nargs="*")
@@ -238,33 +268,57 @@ def main():
             cbh = hourly_cbh(ds, hours)
         if site in ARM_STREAMS:
             r = arm_site(site, hours, cbh, a)
-        elif site in CLOUDNET_SITES:
-            r = cloudnet_site(site, hours, cbh, a)
         elif site in FALLBACK:
             r = fallback_site(site, hours)
+        elif site in CLOUDNET_SITES:
+            r = combine(cloudnet_site(site, hours, cbh, a), radar_site(site, hours, cbh, a), hours)
         else:
             r = radar_site(site, hours, cbh, a)
         if r is None:
-            print(f"{site}: no lidar files")
+            print(f"{site}: no lidar or radar files")
             continue
         out, W, src = r
-        nmin = 30 if W is not None else (20 if src.startswith("cloudnet_radar") else a.min_n)  # 20 x 30 s = 10 min
-        ok = out["n"].fillna(0) >= nmin
+        if "nmin" not in out:
+            out["nmin"] = 30 if W is not None else (20 if src.startswith("cloudnet_radar") else a.min_n)
+        ok = out["n"].fillna(0) >= out["nmin"]
         out.loc[~ok, ["sigma_w", "w_mean"]] = np.nan
-        dv = {"sigma_w": ("hour", out.sigma_w.values, {"units": "m s-1", "long_name": f"w std {a.top:.0f}-{a.depth:.0f} m below cloud base"}),
-              "w_mean": ("hour", out.w_mean.values, {"units": "m s-1"}),
-              "n_samples": ("hour", out.n.fillna(0).astype(int).values),
-              "sigma_w_cb": ("hour", out.sigma_w_cb.values, {"units": "m s-1", "long_name": "cloud-base w IQR / 1.349 (ARM VAP)"})}
         if W is not None:
-            dv["w"] = (("hour", "sample"), W, {"units": "m s-1"})
+            W[~ok.values] = np.nan
+        # Cloudnet lidar/radar hourly means come out at -0.1 to -0.2 m/s (-0.6 at Schneefernerhaus): drizzle/ice
+        # fall speeds or terrain, not the mean updraft below a stratiform cloud base, which is ~0 (as the ARM
+        # lidars show). The Gaussian therefore gets mean 0; the observed mean is kept as w_mean_obs.
+        wm = (out.w_mean * 0.0 if src.startswith(("cloudnet", "lidar+radar")) else out.w_mean).where(ok)
+        hsrc = out["hour_source"].values.astype(object) if "hour_source" in out else np.where(ok, src, "none").astype(object)
+        dv = {"sigma_w": ("hour", out.sigma_w.values, {"units": "m s-1", "long_name": "w std near cloud base"}),
+              "w_mean": ("hour", wm.values, {"units": "m s-1", "long_name": "mean w used for the PDF"}),
+              "w_mean_obs": ("hour", out.w_mean.values, {"units": "m s-1", "long_name": "observed hourly mean w"}),
+              "n_samples": ("hour", out.n.fillna(0).astype(int).values),
+              "sigma_w_cb": ("hour", out.sigma_w_cb.values, {"units": "m s-1",
+                             "long_name": "check: ARM cloud-base IQR/1.349, or radar without sub-30-s part"}),
+              "hour_source": ("hour", hsrc)}
+        for k in ("sigma_w_lidar", "sigma_w_radar"):
+            if k in out:
+                dv[k] = ("hour", out[k].values, {"units": "m s-1"})
+        if W is not None:
+            dv["w"] = (("hour", "sample"), W, {"units": "m s-1", "long_name": "w minus hourly mean"})
         xr.Dataset(dv, coords={"hour": hours.values},
-                   attrs={"w_source": src, "layer": f"{a.top}-{a.depth} m below cloud base"}
+                   attrs={"w_source": src, "lidar_layer": f"{a.top}-{a.depth} m below cloud base",
+                          "radar_layer": f"0-{a.radar_depth} m above cloud base, Z < {a.zmax} dBZ"}
                    ).to_netcdf(os.path.join(HERE, "updrafts", f"{site}_w_radar.nc" if site == "zeppelin"
                                             else f"{site}_w_cloudbase.nc"))
-        s = out.sigma_w[ok]
-        extra = f", sigma_w_cb median {np.nanmedian(out.sigma_w_cb):.2f}" if out.sigma_w_cb.notna().any() else ""
-        print(f"{site:16s} {src:32s} {ok.sum():5d}/{len(hours)} hours, sigma_w median {s.median():.2f} "
-              f"(10-90 %: {s.quantile(.1):.2f}-{s.quantile(.9):.2f}), w_mean median {out.w_mean[ok].median():+.2f}{extra}")
+        sw = out.sigma_w[ok]
+        extra = f", check {np.nanmedian(out.sigma_w_cb):.2f}" if out.sigma_w_cb.notna().any() else ""
+        print(f"{site:16s} {src:32s} {ok.sum():5d}/{len(hours)} hours, sigma_w median {sw.median():.2f} "
+              f"(10-90 %: {sw.quantile(.1):.2f}-{sw.quantile(.9):.2f}), w_mean_obs median "
+              f"{out.w_mean[ok].median():+.2f}{extra}", flush=True)
+        if "hour_source" in out:
+            print("    hours by source: " + ", ".join(f"{k} {v}" for k, v in pd.Series(hsrc[ok.values]).value_counts().items()))
+        if "sigma_w_lidar" in out:
+            both = out.sigma_w_lidar.notna() & out.sigma_w_radar.notna()
+            if both.sum() >= 10:
+                print(f"    lidar vs radar sigma_w in {both.sum()} hours with both: median ratio radar/lidar "
+                      f"{np.median(out.sigma_w_radar[both] / out.sigma_w_lidar[both]):.2f}, r = "
+                      f"{np.corrcoef(out.sigma_w_radar[both], out.sigma_w_lidar[both])[0, 1]:.2f}")
 
 
 if __name__ == "__main__":

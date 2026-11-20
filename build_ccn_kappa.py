@@ -40,7 +40,7 @@ import xarray as xr
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from build_composition import (ARM_GROUP, OBS, arm_bad, arm_bounds, arm_files,  # noqa: E402
-                               ebas_bounds, ebas_files, ebas_valid)
+                               ebas_bounds, ebas_valid)
 
 warnings.filterwarnings("ignore", category=xr.SerializationWarning)
 
@@ -146,9 +146,23 @@ def read_arm(site):
     return rows
 
 
+def ccn_files_for(site):
+    """EBAS CCN files of every station this site uses (Zeppelin / Ny-Alesund and Pallas / Kenttarova
+    share stations, but the manifest lists a CCN file only for the site whose hours it covered)."""
+    p = os.path.join(OBS, "manifest.csv")
+    if not os.path.exists(p) or os.path.getsize(p) == 0:
+        return []
+    m = pd.read_csv(p)
+    m = m[m.source == "EBAS"]
+    st = m.path.str.split("/").str[-2]
+    mine = set(st[m.site == site])
+    files = m.path[(m.category == "ccn") & st.isin(mine)].unique()
+    return [os.path.join(HERE, x) for x in files if os.path.exists(os.path.join(HERE, x))]
+
+
 def read_ebas(site):
     rows = []
-    for f in ebas_files(site, "ccn"):
+    for f in ccn_files_for(site):
         try:
             with xr.open_dataset(f) as ds:
                 s, e = ebas_bounds(ds)

@@ -34,8 +34,8 @@ Species mapping (PARSEC has no nitrate or chloride):
 
 CAMS (kg kg-1) is taken at the grid point nearest the site and the pressure level nearest the
 station's standard-atmosphere pressure, and converted to ug m-3 with the standard-atmosphere density
-there. A bulk kappa (volume-weighted, Petters & Kreidenweis values) is stored as a diagnostic only:
-PARSEC computes its own Koehler curves from the composition.
+there. A bulk kappa (volume-weighted, with the kappa PARSEC's own Koehler curve implies for each column) is
+stored as a diagnostic.
 
 The placeholder fractions are kept as massfrac_placeholder the first time the file is updated.
 Hours are taken as the start of the hour, so the matching window is [hour, hour + 1 h).
@@ -83,9 +83,12 @@ SEASALT_PER_NA = 3.26
 SEASALT_DRY_80RH = 4.3          # CAMS sea salt is at 80 % RH
 MAC637 = 6.6                    # m2 g-1
 
-# kappa and density (g cm-3) per PARSEC column, for the bulk-kappa diagnostic only
-KAPPA = np.array([0.90, 0.56, 0.61, 0.10, 0.0, 0.03, 1.10, 0.10])
-RHO = np.array([1.83, 1.78, 1.77, 1.40, 1.80, 2.65, 2.17, 1.40])
+# kappa and density (g cm-3) per PARSEC column as PARSEC's Koehler curve sees them: ideal solution,
+# full dissociation (H2SO4, NH4HSO4, (NH4)2SO4: 3 ions; sea salt as NaCl: 2; organics: 1 ion at
+# 200 g mol-1 with org_sol_frac = 1, i.e. kappa = n M_w rho / (rho_w M)); BC and dust insoluble.
+# Densities from mo_parsec_m7par.f90. SVOC uses org_mol_mass / org_densities of the namelist (0.2, 1500).
+KAPPA = np.array([1.014, 0.836, 0.724, 0.135, 0.0, 0.0, 1.335, 0.135])
+RHO = np.array([1.841, 1.78, 1.77, 1.50, 2.00, 2.65, 2.165, 1.50])
 
 ARM_ACSM_VARS = {"org": "total_organics", "so4": "sulfate", "nh4": "ammonium", "no3": "nitrate", "chl": "chloride"}
 

@@ -269,9 +269,13 @@ def main():
         print(f"nothing found; {os.path.relpath(a.out, HERE)} left unchanged")
         return
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
-    if os.path.exists(a.out):                      # keep the rows of the source not searched this time
-        old = pd.read_csv(a.out)
-        t = pd.concat([old[~old.source.isin(t.source.unique())], t], ignore_index=True)
+    if os.path.exists(a.out) and os.path.getsize(a.out) > 0:   # keep rows of the source not searched now
+        try:
+            old = pd.read_csv(a.out)
+            if "source" in old:
+                t = pd.concat([old[~old.source.isin(t.source.unique())], t], ignore_index=True)
+        except pd.errors.EmptyDataError:
+            pass
     t.to_csv(a.out, index=False)
 
     # per site and category: best single dataset and the union of dataset periods

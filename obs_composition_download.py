@@ -194,9 +194,12 @@ def main():
         os.makedirs(OUT, exist_ok=True)
         path = os.path.join(OUT, "manifest.csv")
         m = pd.DataFrame(manifest)
-        if os.path.exists(path):                       # keep rows of the source not rerun now
-            old = pd.read_csv(path)
-            m = pd.concat([old[~old.source.isin(m.source.unique())], m], ignore_index=True)
+        if os.path.exists(path) and os.path.getsize(path) > 0:   # keep rows of the source not rerun now
+            try:
+                old = pd.read_csv(path)
+                m = pd.concat([old[~old.source.isin(m.source.unique())], m], ignore_index=True)
+            except pd.errors.EmptyDataError:
+                pass
         m.to_csv(path, index=False)
         print(f"\nmanifest: {os.path.relpath(path, HERE)} ({len(m)} rows)")
 

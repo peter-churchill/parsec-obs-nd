@@ -14,7 +14,9 @@ Cloudnet (doppler-lidar, vertical stare, v): per profile the layer-mean v (gates
 
 Cloudnet radar (categorize; sites without lidar): Doppler velocity in non-drizzling cloud-droplet gates
   from cloud base to --radar-depth m above it, see radar_site().
-Fallback (Puijo, Pallas: neither): one sigma_w for all hours, the median of the boreal lidar sites.
+  Radar sigma_w is divided by RADAR_TO_LIDAR (1.19, the median radar/lidar ratio where both exist), since the
+  in-cloud radar layer is more turbulent than the sub-cloud lidar layer; sigma_w_radar_raw keeps the original.
+Fallback (Puijo, Pallas: neither): one sigma_w for all hours, the median of the boreal lidar sites' lidar hours.
 
 Writes updrafts/<site>_w_cloudbase.nc (sigma_w, w_mean, n, sigma_w_cb; w samples for Cloudnet lidar) with
 w_source. Zeppelin's file comes from zeppelin_bolin.py and is left alone; the Ny-Alesund radar on
@@ -42,6 +44,10 @@ from updraft_download import ARM_STREAMS, CLOUDNET_RADAR_SITES, CLOUDNET_SITES  
 
 # sites with neither lidar nor radar on their cloud days: per-regime sigma_w pooled from these lidar sites
 FALLBACK = {"puijo": ["hyytiala", "kenttarova"], "pallas": ["kenttarova", "hyytiala"]}
+# Radar sigma_w (in cloud, just above base) / lidar sigma_w (just below base) over the 1030 hours with both at
+# Hyytiala, Granada, Kenttarova, Melpitz, Bucharest and Cabauw (2026-11-20 run): hour-weighted median ratio 1.19.
+# Radar values are divided by it (--radar-scale) so all sites refer to the sub-cloud lidar layer.
+RADAR_TO_LIDAR = 1.19
 
 UPD = os.path.join(HERE, "data", "updraft")
 warnings.filterwarnings("ignore", message="Mean of empty slice")
@@ -198,6 +204,8 @@ def radar_site(site, hours, cbh_h, a):
     out = pd.DataFrame({"sigma_w": np.sqrt(g["w"].var(ddof=0) + g["vs2"].mean().fillna(0)),
                         "w_mean": g["w"].mean(), "n": g.size()}).reindex(hours)
     out["sigma_w_cb"] = g["w"].std().reindex(hours)          # without the sub-30-s part, as a lower bound
+    out["sigma_w_radar_raw"] = out["sigma_w"]
+    out["sigma_w"] = out["sigma_w"] / a.radar_scale
     return out, None, "cloudnet_radar_above_cb"
 
 
@@ -207,8 +215,8 @@ def fallback_site(site, hours):
     for s in FALLBACK.get(site, []):
         p = os.path.join(HERE, "updrafts", f"{s}_w_cloudbase.nc")
         if os.path.exists(p):
-            with xr.open_dataset(p) as d:
-                pool.append(d["sigma_w"].values)
+            with xr.open_dataset(p) as d:                  # lidar hours only (radar-filled hours excluded)
+                pool.append(d["sigma_w_lidar"].values if "sigma_w_lidar" in d else d["sigma_w"].values)
     x = np.concatenate(pool) if pool else np.array([])
     x = x[np.isfinite(x)]
     if len(x) < 30:
@@ -240,7 +248,7 @@ def combine(lid, rad, hours):
     out["nmin"] = np.where(useR, 20, 30)
     out["hour_source"] = np.where(okL, "lidar", np.where(okR, "radar", "none"))
     out["sigma_w_lidar"] = L.sigma_w.where(okL)
-    out["sigma_w_radar"] = R.sigma_w.where(okR)
+    out["sigma_w_radar"] = R["sigma_w_radar_raw"].where(okR)
     if W is not None:
         W[useR.values] = np.nan
     return out, W, "lidar+radar"
@@ -255,6 +263,8 @@ def main():
     ap.add_argument("--max-samples", type=int, default=600)
     ap.add_argument("--radar-depth", type=float, default=150.0, help="radar layer, m above cloud base")
     ap.add_argument("--zmax", type=float, default=-20.0, help="max radar reflectivity (dBZ) for non-drizzling gates")
+    ap.add_argument("--radar-scale", type=float, default=RADAR_TO_LIDAR,
+                    help="divide radar sigma_w by this (radar/lidar ratio where both exist; 1 = no scaling)")
     a = ap.parse_args()
     sites = a.sites or (sorted(set(ARM_STREAMS) | set(CLOUDNET_SITES) | set(CLOUDNET_RADAR_SITES) - set(FALLBACK))
                         + sorted(FALLBACK))                 # fallbacks last: they pool the lidar sites' results
@@ -296,7 +306,7 @@ def main():
               "sigma_w_cb": ("hour", out.sigma_w_cb.values, {"units": "m s-1",
                              "long_name": "check: ARM cloud-base IQR/1.349, or radar without sub-30-s part"}),
               "hour_source": ("hour", hsrc)}
-        for k in ("sigma_w_lidar", "sigma_w_radar"):
+        for k in ("sigma_w_lidar", "sigma_w_radar", "sigma_w_radar_raw"):
             if k in out:
                 dv[k] = ("hour", out[k].values, {"units": "m s-1"})
         if W is not None:
@@ -316,7 +326,7 @@ def main():
         if "sigma_w_lidar" in out:
             both = out.sigma_w_lidar.notna() & out.sigma_w_radar.notna()
             if both.sum() >= 10:
-                print(f"    lidar vs radar sigma_w in {both.sum()} hours with both: median ratio radar/lidar "
+                print(f"    lidar vs radar sigma_w (radar unscaled) in {both.sum()} hours with both: median ratio radar/lidar "
                       f"{np.median(out.sigma_w_radar[both] / out.sigma_w_lidar[both]):.2f}, r = "
                       f"{np.corrcoef(out.sigma_w_radar[both], out.sigma_w_lidar[both])[0, 1]:.2f}")
 

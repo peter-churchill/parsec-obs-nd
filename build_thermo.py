@@ -8,13 +8,15 @@ Zeppelin station), in order:
                         measured cloud base, when cloud base is within --coupled m (300) of the surface LCL,
                         i.e. the sub-cloud layer is coupled to the surface
   station_met           in-cloud stations (Puijo, Pallas, Mt Soledad): the station's own T and p
-  era5_decoupled        ERA5 at cloud base when the cloud is decoupled from the surface
-  era5_cloud_base /     ERA5 where there is no surface met (T linear, ln p linear in geopotential height at
-  era5_station          the nearest grid point; site altitude + cloud base height, or the station)
+  <model>_decoupled     model at cloud base when the cloud is decoupled from the surface
+  <model>_cloud_base /  model where there is no surface met (T linear, ln p linear in height; site altitude
+  <model>_station       + cloud base height, or the station). <model> is cloudnet_model (the model profiles
+                        in the Cloudnet categorize files from updraft_download.py) where those exist, else
+                        era5 (era5_download.py)
   surface_decoupled     surface dry adiabat for decoupled hours without ERA5
 
-All candidates are stored (T_surface_cb, P_surface_cb, T_era5, P_era5, cbh_minus_lcl). The script prints
-surface minus ERA5, and at the NDROP sites both minus the measured cloud-base values, as checks.
+All candidates are stored (T_surface_cb, P_surface_cb, T_model, P_model, cbh_minus_lcl). The script prints
+surface minus model, and at the NDROP sites both minus the measured cloud-base values, as checks.
 
 Needs data/met/ (met_download.py) and/or data/era5/ (era5_download.py); either alone works.
 
@@ -153,6 +155,38 @@ def load_surface(site, hours):
     return None, None
 
 
+def load_cloudnet_model(site, hours, z_target):
+    """T (K) and p (Pa) at z_target (m a.s.l.) from the model profiles in the Cloudnet categorize files
+    downloaded for the updrafts (nearest model hour within 1 h; T linear, ln p linear in height)."""
+    from updraft_download import CLOUDNET_RADAR_SITES
+    cid = CLOUDNET_RADAR_SITES.get(site)
+    T = np.full(len(hours), np.nan)
+    P = np.full(len(hours), np.nan)
+    files = sorted(glob.glob(os.path.join(HERE, "data", "updraft", "cloudnet_categorize", cid or "-", "*.nc")))
+    pos = {h: i for i, h in enumerate(hours)}
+    for f in files:
+        try:
+            with xr.open_dataset(f) as ds:
+                mt = pd.DatetimeIndex(ds["model_time"].values)
+                zh = ds["model_height"].values.astype(float)
+                tt = ds["temperature"].values.astype(float)
+                pp = ds["pressure"].values.astype(float)
+            for k, t in enumerate(mt):
+                i = pos.get(t.round("h"))
+                if i is None or not np.isfinite(z_target[i]) or abs((t - t.round("h")).total_seconds()) > 3600:
+                    continue
+                z = zh if zh.ndim == 1 else zh[k]
+                o = np.argsort(z)
+                ok = np.isfinite(tt[k][o]) & np.isfinite(pp[k][o]) & (pp[k][o] > 0)
+                if ok.sum() < 3 or not (z[o][ok][0] <= z_target[i] <= z[o][ok][-1]):
+                    continue
+                T[i] = np.interp(z_target[i], z[o][ok], tt[k][o][ok])
+                P[i] = np.exp(np.interp(z_target[i], z[o][ok], np.log(pp[k][o][ok])))
+        except Exception as ex:                                                      # noqa: BLE001
+            print(f"    skip {os.path.basename(f)}: {str(ex)[:80]}")
+    return T, P
+
+
 def surface_to_cloud_base(T, RH, P, cbh):
     """Dry adiabat from the surface to cloud base; also the LCL (Espy, 125 m per K of dew-point depression)."""
     a, b = 17.625, 243.04
@@ -179,9 +213,14 @@ def build_site(site, dry_run=False, coupled_m=300.0):
     print(f"\n{site} ({kind}): {len(hours)} hours, station {alt:.0f} m"
           + ("" if kind == "insitu" else f", cloud base median {np.nanmedian(cbh):.0f} m above ground"))
 
+    # model fallback: Cloudnet categorize model profiles first (no queue), ERA5 where those are missing
+    T_c, P_c = load_cloudnet_model(site, hours, z_t)
     parts = load_era5(site)
-    T_e, P_e = interp_at(parts, hours, z_t) if parts else (np.full(len(hours), np.nan),) * 2
+    T_r, P_r = interp_at(parts, hours, z_t) if parts else (np.full(len(hours), np.nan),) * 2
+    have_c = np.isfinite(T_c) & np.isfinite(P_c)
+    T_e, P_e = np.where(have_c, T_c, T_r), np.where(have_c, P_c, P_r)
     have_e = np.isfinite(T_e) & np.isfinite(P_e)
+    msrc = np.where(have_c, "cloudnet_model", "era5")
     sfc, ssrc = load_surface(site, hours)
     if sfc is not None:
         Ts, RHs, Ps = sfc["T"].values, sfc["RH"].values, sfc["P"].values
@@ -197,7 +236,8 @@ def build_site(site, dry_run=False, coupled_m=300.0):
         have_s = np.zeros(len(hours), bool)
     dcoup = cbh - z_lcl
     coupled = np.abs(dcoup) <= coupled_m
-    print(f"   surface met ({ssrc or 'none'}): {have_s.sum()} hours; ERA5: {have_e.sum()} hours"
+    print(f"   surface met ({ssrc or 'none'}): {have_s.sum()} hours; model: {have_e.sum()} hours "
+          f"(Cloudnet model {have_c.sum()}, ERA5 {int((have_e & ~have_c).sum())})"
           + ("" if kind == "insitu" or not have_s.any() else
              f"; cloud base - LCL median {np.nanmedian(dcoup):+.0f} m, coupled (|d| <= {coupled_m:.0f} m) "
              f"{int(np.sum(coupled & have_s))} of {have_s.sum()}"))
@@ -207,12 +247,12 @@ def build_site(site, dry_run=False, coupled_m=300.0):
     T0, P0 = ds["T0"].values.copy(), ds["P0"].values.copy()
     if kind == "insitu":
         use_s, use_e = ~meas & have_s, ~meas & ~have_s & have_e
-        tag_s, tag_e = "station_met", "era5_station"
+        tag_s, tag_e = "station_met", np.char.add(msrc.astype(str), "_station")
     else:
         use_s = ~meas & have_s & (coupled | ~have_e)
         use_e = ~meas & ~use_s & have_e
         tag_s = np.where(coupled, "surface_dry_adiabat", "surface_decoupled")
-        tag_e = np.where(have_s, "era5_decoupled", "era5_cloud_base")
+        tag_e = np.char.add(msrc.astype(str), np.where(have_s, "_decoupled", "_cloud_base"))
     T0[use_s], P0[use_s] = T_s[use_s], P_s[use_s]
     T0[use_e], P0[use_e] = T_e[use_e], P_e[use_e]
     src[use_s] = tag_s if isinstance(tag_s, str) else tag_s[use_s]
@@ -220,11 +260,11 @@ def build_site(site, dry_run=False, coupled_m=300.0):
 
     both = have_s & have_e & (coupled if kind != "insitu" else True)
     if both.sum() >= 10:
-        print(f"   surface - ERA5 ({int(both.sum())} h): T {np.nanmedian(T_s[both] - T_e[both]):+.1f} K "
+        print(f"   surface - model ({int(both.sum())} h): T {np.nanmedian(T_s[both] - T_e[both]):+.1f} K "
               f"(IQR {np.nanpercentile(T_s[both] - T_e[both], 25):+.1f}..{np.nanpercentile(T_s[both] - T_e[both], 75):+.1f}), "
               f"p {np.nanmedian(P_s[both] - P_e[both]) / 100:+.0f} hPa")
     mb = (ds["thermo_source"].values == "built_file_cloud_base")
-    for name, TT, PP, hv in (("surface", T_s, P_s, have_s & coupled), ("ERA5", T_e, P_e, have_e)):
+    for name, TT, PP, hv in (("surface", T_s, P_s, have_s & coupled), ("model", T_e, P_e, have_e)):
         m = mb & hv
         if m.sum() >= 10:
             print(f"   {name} - measured cloud base ({m.sum()} h): T {np.nanmedian(TT[m] - ds['T0'].values[m]):+.1f} K, "
@@ -235,8 +275,8 @@ def build_site(site, dry_run=False, coupled_m=300.0):
     ds["T0"] = ("hour", T0, ds["T0"].attrs)
     ds["P0"] = ("hour", P0, ds["P0"].attrs)
     ds["thermo_source"] = ("hour", src)
-    ds["T_era5"] = ("hour", T_e, {"units": "K", "long_name": "ERA5 temperature at z_target"})
-    ds["P_era5"] = ("hour", P_e, {"units": "Pa", "long_name": "ERA5 pressure at z_target"})
+    ds["T_model"] = ("hour", T_e, {"units": "K", "long_name": "Cloudnet model (else ERA5) temperature at z_target"})
+    ds["P_model"] = ("hour", P_e, {"units": "Pa", "long_name": "Cloudnet model (else ERA5) pressure at z_target"})
     ds["T_surface_cb"] = ("hour", T_s, {"units": "K", "long_name": "surface T on a dry adiabat to cloud base (station T in cloud)"})
     ds["P_surface_cb"] = ("hour", P_s, {"units": "Pa"})
     ds["cbh_minus_lcl"] = ("hour", dcoup, {"units": "m", "long_name": "cloud base minus surface LCL (coupling)"})

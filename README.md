@@ -164,6 +164,16 @@ results/nd_comparison_summary.csv (by site, composition tier and cloud-base T/P 
 results/nd_parcel_vs_obs.png, and prints the Zeppelin activation-diameter check. Variants: the site's
 updraft file (obs); Zeppelin also with zero mean w; Puijo and Pallas also with fixed sigma_w bounds.
 
+## Susceptibility profiles, closure and activation diameters
+
+```bash
+python susceptibility_parcel.py --n-boot 200     # after compare_nd.py; needs OBS_REPO
+```
+
+S(D), D_Delta and S(D_Delta) for observed and parcel Nd (pdf and flux weighting) on the same hours and the same
+N(>D), computed with the observational recipe (arm_ena_nd_pnsd.susceptibility_table, day-block bootstrap), and
+the parcel activation diameter. Output in results/susceptibility_parcel/.
+
 ## PARSEC settings
 
 - adiabatic ascent, constant updraft, start RH 98 % at T0/P0, end 150 m above cloud base

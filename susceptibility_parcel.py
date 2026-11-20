@@ -1,0 +1,303 @@
+#!/usr/bin/env python
+"""Susceptibility profiles, closure diameters and activation diameters: parcel model against observations.
+
+For each site with updraft-weighted parcel Nd (results/<site>_parcel_nd_obs_<weighting>.nc from compare_nd.py),
+on the same hours and with the same N(>D) (the CCN(time, diameter) matrix of the observational built file):
+
+  S(D)        susceptibility dln Nd / dln N(>D) at every cutoff D, by the observational recipe itself
+              (arm_ena_nd_pnsd.susceptibility_table: log10, equal-number bins, regression through the bin
+              medians), with 95 % day-block bootstrap intervals (bootstrap_by_day), for
+              Nd = observed, parcel (pdf weighting) and parcel (flux weighting)
+  D_Delta     closure diameter: where mean log Nd = mean log N(>D), with its bootstrap interval
+  D_act       parcel activation diameter: 2 x PARSEC's smallest activated dry radius, averaged over each hour's
+              updraft distribution with the same weighting as Nd; its median over the hours and the diameter
+              N(>D) = the hours' mean log of N(>D_act) (comparable to D_Delta)
+  D_act,obs   observed activation diameter where one exists (Zeppelin: cloud residuals vs whole air)
+
+Writes results/susceptibility_parcel/<site>_profiles.csv (D, S and CI for each Nd), results/susceptibility_parcel/
+summary.csv (one row per site: D_Delta, S(D_Delta), S(100 nm), D_act with intervals) and three figures:
+  profiles.png      S(D) per site: observed (black, CI shaded) vs parcel pdf / flux, with D_Delta and D_act marked
+  s_at_ddelta.png   S(D_Delta) vs D_Delta, observed and parcel, joined per site
+  ddelta_vs_dact.png  D_Delta (observed, parcel) against the parcel activation diameter, with 1:1
+
+The observational screens are those of the inputs (build_parcel_inputs.py); the profiles therefore cover the hours
+with a spectrum and a parcel result, which can differ slightly from the published quicklook.
+
+Needs OBS_REPO (arm_ena_nd_pnsd.py and the built files) and scipy.
+
+Examples
+--------
+python susceptibility_parcel.py --n-boot 200
+python susceptibility_parcel.py --sites ena sgp hyytiala --n-boot 50
+"""
+import argparse
+import glob
+import os
+import sys
+import warnings
+
+import numpy as np
+import pandas as pd
+import xarray as xr
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from sites import SITES  # noqa: E402
+
+OUT = os.path.join(HERE, "results", "susceptibility_parcel")
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+
+def load_built(site, obs_repo):
+    p = os.path.join(obs_repo, SITES[site]["built"])
+    with xr.open_dataset(p) as ds:
+        t = pd.DatetimeIndex(ds["time"].values).floor("h")
+        ccn = ds["CCN"].values.astype(float)
+        diam = ds["diameter"].values.astype(float)
+    df = pd.DataFrame(ccn, index=t)
+    return df[~df.index.duplicated()], diam
+
+
+def parcel_dact(site, wt, rundir, hours):
+    """Updraft-weighted parcel activation diameter (nm) per hour, weighted like Nd."""
+    from weight_updrafts import gaussian_positive
+    files = sorted(glob.glob(os.path.join(rundir, site, "chunk_*.csv")))
+    wf = os.path.join(HERE, "updrafts", f"{site}_w_cloudbase.nc")
+    if not files or not os.path.exists(wf):
+        return pd.Series(np.nan, index=hours)
+    df = pd.concat([pd.read_csv(f, parse_dates=["hour"]) for f in files], ignore_index=True)
+    df = df[df["status"] == "ok"].drop_duplicates(["hour", "w"], keep="last")
+    r = df.pivot_table(index="hour", columns="w", values="r_act_min_nm")
+    wgrid = r.columns.to_numpy(float)
+    with xr.open_dataset(wf) as d:
+        wh = pd.DatetimeIndex(d["hour"].values)
+        sig = pd.Series(d["sigma_w"].values, index=wh)
+        mu = pd.Series(d["w_mean"].values if "w_mean" in d else 0.0, index=wh)
+        W = pd.DataFrame(d["w"].values, index=wh) if "w" in d else None
+    out = pd.Series(np.nan, index=hours)
+    for h in hours:
+        if h not in r.index:
+            continue
+        row = r.loc[h].to_numpy(float)
+        ok = np.isfinite(row) & (row > 0)
+        if ok.sum() < 3:
+            continue
+        w = W.loc[h].to_numpy(float) if (W is not None and h in W.index) else np.array([])
+        w = w[np.isfinite(w) & (w > 0)]
+        if len(w) >= 30:
+            wq, pq = w, np.ones(len(w)) / len(w)
+        else:
+            s, m = sig.get(h, np.nan), mu.get(h, 0.0)
+            if not (np.isfinite(s) and s > 0):
+                continue
+            wq, pq = gaussian_positive(s, 0.0 if not np.isfinite(m) else m)
+            if wq is None:
+                continue
+        lw = np.log(np.clip(wq, wgrid[ok][0], wgrid[ok][-1]))
+        dq = 2 * np.exp(np.interp(lw, np.log(wgrid[ok]), np.log(row[ok])))
+        f = pq * (wq if wt == "flux" else 1)
+        out[h] = np.sum(dq * f) / np.sum(f)
+    return out
+
+
+def interp_log(d, y, x):
+    ok = np.isfinite(y)
+    return float(np.interp(np.log10(x), np.log10(d[ok]), y[ok])) if ok.sum() > 1 and np.isfinite(x) else np.nan
+
+
+def n_above_at(ccn, diam, dvals):
+    """N(>D) per hour at an hour-specific D, interpolated in log D / log N."""
+    out = np.full(len(dvals), np.nan)
+    for i, dv in enumerate(dvals):
+        c = ccn[i]
+        ok = np.isfinite(c) & (c > 0)
+        if ok.sum() > 1 and np.isfinite(dv):
+            out[i] = 10 ** np.interp(np.log10(dv), np.log10(diam[ok]), np.log10(c[ok]))
+    return out
+
+
+def site_analysis(site, a, aq):
+    nd_files = {wt: os.path.join(HERE, "results", f"{site}_parcel_nd_obs_{wt}.nc") for wt in ("pdf", "flux")}
+    if not all(os.path.exists(f) for f in nd_files.values()):
+        print(f"{site}: no weighted parcel results (run compare_nd.py first)")
+        return None
+    ccn_df, diam = load_built(site, a.obs_repo)
+    nd = {}
+    for wt, f in nd_files.items():
+        with xr.open_dataset(f) as d:
+            s = pd.Series(d["Nd_parcel"].values, index=pd.DatetimeIndex(d["hour"].values))
+            nd[f"parcel_{wt}"] = s
+            nd["obs"] = pd.Series(d["Nd_obs"].values, index=s.index)
+            thermo = pd.Series(d["thermo_source"].values.astype(str), index=s.index)
+    hours = nd["obs"].index
+    keep = (thermo != "placeholder") & nd["obs"].gt(0) & nd["parcel_pdf"].gt(0) & nd["parcel_flux"].gt(0)
+    keep &= hours.isin(ccn_df.index)
+    hours = hours[keep.values]
+    if len(hours) < 30:
+        print(f"{site}: only {len(hours)} matched hours; skipped")
+        return None
+    ccn = ccn_df.loc[hours].to_numpy(float)
+    times = hours.values
+    prof = pd.DataFrame({"D_nm": diam})
+    row = dict(site=site, regime=SITES[site]["regime"], kind=SITES[site]["kind"], hours=len(hours),
+               days=len(np.unique(hours.normalize())))
+    i100 = int(np.argmin(np.abs(diam - 100)))
+    for key in ("obs", "parcel_pdf", "parcel_flux"):
+        y = nd[key].loc[hours].to_numpy(float)
+        tab, dd = aq.susceptibility_table(ccn, y, diam)
+        sb, db = aq.bootstrap_by_day(times, ccn, y, diam, a.n_boot)
+        ci = np.array([aq._ci(sb[:, i]) for i in range(len(diam))])
+        prof[f"S_{key}"], prof[f"S_{key}_lo"], prof[f"S_{key}_hi"] = tab["S"].values, ci[:, 0], ci[:, 1]
+        prof[f"delta_{key}"] = tab["delta_dex"].values
+        dlo, dhi = aq._ci(db)
+        row.update({f"Dd_{key}": dd, f"Dd_{key}_lo": dlo, f"Dd_{key}_hi": dhi,
+                    f"S_Dd_{key}": interp_log(diam, tab["S"].values, dd),
+                    f"S_Dd_{key}_lo": interp_log(diam, ci[:, 0], dd), f"S_Dd_{key}_hi": interp_log(diam, ci[:, 1], dd),
+                    f"S100_{key}": tab["S"].values[i100], f"S100_{key}_lo": ci[i100, 0], f"S100_{key}_hi": ci[i100, 1],
+                    f"Nd_median_{key}": np.median(y)})
+    for wt in ("pdf", "flux"):
+        da = parcel_dact(site, wt, a.rundir, hours)
+        v = da.to_numpy(float)
+        na = n_above_at(ccn, diam, v)
+        ok = np.isfinite(na) & (na > 0)
+        # diameter at which mean log N(>D) equals the hours' mean log N(>D_act): D_act on the D_Delta scale
+        if ok.sum() > 10:
+            target = np.log10(na[ok]).mean()
+            m = np.log10(np.where(ccn[ok] > 0, ccn[ok], np.nan)).mean(axis=0)
+            d_eq = 10 ** np.interp(-target, -m[np.isfinite(m)], np.log10(diam[np.isfinite(m)]))
+        else:
+            d_eq = np.nan
+        row.update({f"Dact_{wt}_median": np.nanmedian(v), f"Dact_{wt}_q25": np.nanpercentile(v, 25),
+                    f"Dact_{wt}_q75": np.nanpercentile(v, 75), f"Dact_{wt}_closure": d_eq})
+    if site == "zeppelin" and os.path.exists(os.path.join(HERE, "results", "zeppelin_activation.nc")):
+        with xr.open_dataset(os.path.join(HERE, "results", "zeppelin_activation.nc")) as d:
+            o = pd.Series(d["d_act_int"].values, index=pd.DatetimeIndex(d["hour"].values)).reindex(hours)
+        row.update(Dact_obs_median=o.median(), Dact_obs_q25=o.quantile(.25), Dact_obs_q75=o.quantile(.75))
+    os.makedirs(OUT, exist_ok=True)
+    prof.to_csv(os.path.join(OUT, f"{site}_profiles.csv"), index=False, float_format="%.4g")
+    print(f"{site:16s} {len(hours):5d} h  D_Delta obs {row['Dd_obs']:5.0f}  parcel pdf {row['Dd_parcel_pdf']:5.0f} "
+          f"flux {row['Dd_parcel_flux']:5.0f} nm | S(D_Delta) obs {row['S_Dd_obs']:.2f} pdf {row['S_Dd_parcel_pdf']:.2f} "
+          f"flux {row['S_Dd_parcel_flux']:.2f} | D_act pdf {row['Dact_pdf_median']:.0f} (closure-equiv. "
+          f"{row['Dact_pdf_closure']:.0f}) nm", flush=True)
+    return row, prof
+
+
+def plots(rows, profs):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FixedLocator, NullFormatter, ScalarFormatter
+    col = {"obs": "k", "parcel_pdf": "#1f77b4", "parcel_flux": "#ff7f0e"}
+    lab = {"obs": "observed", "parcel_pdf": "parcel (pdf)", "parcel_flux": "parcel (flux)"}
+
+    def logx(ax):
+        ax.set_xscale("log")
+        ax.xaxis.set_major_locator(FixedLocator([10, 20, 50, 100, 200, 300]))
+        ax.xaxis.set_major_formatter(ScalarFormatter())
+        ax.xaxis.set_minor_formatter(NullFormatter())
+
+    n = len(rows)
+    nc = 5
+    nr = int(np.ceil(n / nc))
+    fig, axs = plt.subplots(nr, nc, figsize=(3.3 * nc, 2.7 * nr), sharex=True, sharey=True, squeeze=False)
+    for ax, r, p in zip(axs.flat, rows, profs):
+        d = p["D_nm"].to_numpy(float)
+        ax.fill_between(d, p["S_obs_lo"], p["S_obs_hi"], color="0.85", lw=0)
+        for k in ("obs", "parcel_pdf", "parcel_flux"):
+            ax.plot(d, p[f"S_{k}"], color=col[k], lw=1.4 if k == "obs" else 1.1, label=lab[k])
+            if np.isfinite(r[f"Dd_{k}"]):
+                ax.axvline(r[f"Dd_{k}"], color=col[k], ls="--", lw=0.8)
+        if np.isfinite(r["Dact_pdf_closure"]):
+            ax.axvline(r["Dact_pdf_closure"], color=col["parcel_pdf"], ls=":", lw=1.2)
+        if np.isfinite(r.get("Dact_obs_median", np.nan)):
+            ax.axvline(r["Dact_obs_median"], color="k", ls=":", lw=1.2)
+        ax.axhline(0, color="0.6", lw=0.6)
+        ax.axhline(1, color="0.6", lw=0.6, ls=":")
+        ax.set_title(f"{r['site']} ({r['hours']} h)", fontsize=9)
+        logx(ax)
+        ax.set_ylim(-0.5, 1.5)
+    for ax in axs.flat[n:]:
+        ax.set_visible(False)
+    for ax in axs[-1]:
+        ax.set_xlabel("cutoff diameter (nm)")
+    for ax in axs[:, 0]:
+        ax.set_ylabel("S(D)")
+    axs.flat[0].legend(fontsize=7, loc="upper left")
+    fig.suptitle("Susceptibility profiles: observed (shaded: 95 % day-block CI) vs parcel. "
+                 "Dashed: D$_\\Delta$; dotted: activation diameter (blue parcel, black observed)", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "profiles.png"), dpi=140)
+
+    t = pd.DataFrame(rows)
+    reg = {"Marine": "#1f77b4", "Boreal": "#2ca02c", "Arctic": "#9467bd", "Continental": "#d62728"}
+    fig, ax = plt.subplots(figsize=(9, 6.5))
+    for _, r in t.iterrows():
+        c = reg.get(r["regime"], "0.5")
+        xo, yo, xp, yp = r["Dd_obs"], r["S_Dd_obs"], r["Dd_parcel_pdf"], r["S_Dd_parcel_pdf"]
+        if np.isfinite(xo) and np.isfinite(xp):
+            ax.annotate("", (xp, yp), (xo, yo), arrowprops=dict(arrowstyle="->", color=c, lw=0.8, alpha=0.7))
+        ax.plot(xo, yo, "o", color=c, mec="k", ms=7)
+        ax.plot(xp, yp, "o", mfc="white", mec=c, ms=7, mew=1.5)
+        ax.annotate(r["site"], (xo, yo), xytext=(4, 4), textcoords="offset points", fontsize=7)
+    ax.axhline(0, color="0.6", lw=0.8)
+    ax.axhline(1, color="0.6", lw=0.8, ls=":")
+    logx(ax)
+    ax.set(xlabel="closure diameter D$_\\Delta$ (nm)", ylabel="S(D$_\\Delta$)",
+           title="S(D$_\\Delta$) vs D$_\\Delta$: observed (filled) and parcel, pdf weighting (open), same hours")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "s_at_ddelta.png"), dpi=150)
+
+    fig, ax = plt.subplots(figsize=(6.5, 6))
+    for _, r in t.iterrows():
+        c = reg.get(r["regime"], "0.5")
+        x = r["Dact_pdf_closure"]
+        ax.plot(x, r["Dd_obs"], "o", color=c, mec="k", ms=7)
+        ax.plot(x, r["Dd_parcel_pdf"], "o", mfc="white", mec=c, ms=7, mew=1.5)
+        ax.annotate(r["site"], (x, r["Dd_obs"]), xytext=(4, 3), textcoords="offset points", fontsize=7)
+        if np.isfinite(r.get("Dact_obs_median", np.nan)):
+            ax.plot(r["Dact_obs_median"], r["Dd_obs"], "*", color=c, mec="k", ms=12)
+    lim = [15, 350]
+    ax.plot(lim, lim, "k-", lw=0.8)
+    logx(ax)
+    ax.set_yscale("log")
+    ax.yaxis.set_major_locator(FixedLocator([20, 50, 100, 200, 300]))
+    ax.yaxis.set_major_formatter(ScalarFormatter())
+    ax.set(xlim=lim, ylim=lim, xlabel="activation diameter (nm): parcel, closure-equivalent (star: observed, Zeppelin)",
+           ylabel="closure diameter D$_\\Delta$ (nm)",
+           title="D$_\\Delta$ observed (filled) and parcel (open) vs activation diameter")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "ddelta_vs_dact.png"), dpi=150)
+    print(f"-> {os.path.relpath(OUT, HERE)}/profiles.png, s_at_ddelta.png, ddelta_vs_dact.png")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--sites", nargs="*")
+    ap.add_argument("--obs-repo", default=os.environ.get("OBS_REPO"))
+    ap.add_argument("--rundir", default=os.path.join(HERE, "runs"))
+    ap.add_argument("--n-boot", type=int, default=200)
+    a = ap.parse_args()
+    if not a.obs_repo:
+        ap.error("give --obs-repo or set OBS_REPO")
+    sys.path.insert(0, a.obs_repo)
+    import arm_ena_nd_pnsd as aq
+    sites = a.sites or sorted({os.path.basename(f).split("_parcel_nd_obs_")[0]
+                               for f in glob.glob(os.path.join(HERE, "results", "*_parcel_nd_obs_pdf.nc"))})
+    rows, profs = [], []
+    for s in sites:
+        r = site_analysis(s, a, aq)
+        if r:
+            rows.append(r[0])
+            profs.append(r[1])
+    if not rows:
+        raise SystemExit("nothing to compare")
+    os.makedirs(OUT, exist_ok=True)
+    pd.DataFrame(rows).to_csv(os.path.join(OUT, "summary.csv"), index=False, float_format="%.4g")
+    print(f"-> {os.path.relpath(OUT, HERE)}/summary.csv")
+    plots(rows, profs)
+
+
+if __name__ == "__main__":
+    main()

@@ -66,13 +66,17 @@ dataset's period. Writes `results/composition_inventory.csv` and `..._summary.cs
 ## CAMS EAC4 composition (for hours without measured composition)
 
 ```
-python cams_download.py --dry-run                     # requests per site (months with cloud hours only)
-nohup python -u cams_download.py > logs/cams_download.log 2>&1 &     # login node; ADS queues requests
+python cams_download.py --mode monthly --dry-run      # EAC4 monthly means: one request per region and year (fast)
+python cams_download.py --dry-run                     # 3-hourly EAC4: one request per region and month, cloud days only
+nohup bash -c "python -u cams_download.py --mode monthly --workers 3 && python -u cams_download.py --workers 4" \
+      > logs/cams_download.log 2>&1 &
 ```
 
-Needs `~/.cdsapirc` for the Atmosphere Data Store and the EAC4 licence accepted. Sulfate, organic matter,
-black carbon, sea salt and dust mixing ratios plus T, q and geopotential on the lowest EAC4 pressure levels,
-in a small box around each site; one file per site and month in `data/cams/<site>/`.
+Sites are grouped into five regional boxes (Europe, SGP + Bankhead, EPCAPE, ENA, LASIC), because ADS
+reads whole global fields from tape whatever the area. Needs `~/.cdsapirc` for the Atmosphere Data
+Store and the EAC4 (and EAC4 monthly) licences accepted. Aerosol species only (sulfate, organic
+matter, black carbon, sea salt, dust); T and humidity come from ERA5. EAC4 currently ends in
+December 2025; later days are listed, not requested.
 
 ## PARSEC settings
 

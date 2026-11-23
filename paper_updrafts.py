@@ -35,7 +35,11 @@ import urllib.request
 
 import numpy as np
 import pandas as pd
+import warnings
+
 import xarray as xr
+
+warnings.filterwarnings("ignore", message="Mean of empty slice")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -227,7 +231,9 @@ def lidar_lowcloud_sigma(z_station, depth, min_gate, beta_min):
     if that base is at or below z_station. Its w is the mean v from max(min_gate, base - depth) to the base.
     Hourly sigma_w = std over the counted profiles, for hours with >= 30 of them."""
     rows = []
-    for f in sorted(glob.glob(os.path.join(LIDAR, "*.nc"))):
+    files = sorted(glob.glob(os.path.join(LIDAR, "*.nc")))
+    nprof = ncloud = nlow = 0
+    for f in files:
         try:
             with xr.open_dataset(f) as ds:
                 t = pd.DatetimeIndex(ds["time"].values)
@@ -239,7 +245,10 @@ def lidar_lowcloud_sigma(z_station, depth, min_gate, beta_min):
                 cloud = (beta > beta_min) & ok_z[None, :]
                 has = cloud.any(axis=1)
                 cb = np.where(has, z[np.argmax(cloud, axis=1)], np.nan)
-                sel = has & (cb <= z_station)
+                sel = has & (cb <= z_station) & (cb >= min_gate + 60)   # leave >= 2 gates below the base
+                nprof += len(t)
+                ncloud += int(has.sum())
+                nlow += int(sel.sum())
                 if not sel.any():
                     continue
                 c = cb[sel][:, None]
@@ -249,6 +258,8 @@ def lidar_lowcloud_sigma(z_station, depth, min_gate, beta_min):
                 rows.append(pd.DataFrame(dict(hour=t[sel].floor("h"), w=w, cb=cb[sel])))
         except Exception as ex:                                                      # noqa: BLE001
             print(f"    skip {os.path.basename(f)}: {str(ex)[:80]}")
+    print(f"    {len(files)} lidar files, {nprof} profiles, {ncloud} with cloud base >= {min_gate:.0f} m, "
+          f"{nlow} with base {min_gate + 60:.0f}-{z_station:.0f} m")
     if not rows:
         return pd.Series(dtype=float)
     df = pd.concat(rows).dropna()
@@ -312,8 +323,8 @@ def build(a):
         s = lidar_sigma(ch, PALLAS_DZ - a.depth, PALLAS_DZ - a.top)
         src = f"cloudnet_kenttarova_doppler_lidar_{PALLAS_DZ - a.depth:.0f}-{PALLAS_DZ - a.top:.0f}m_pallas_incloud"
         if len(s) < 30:                         # no met/lidar overlap: lidar cloud base below Pallas instead
-            s = lidar_lowcloud_sigma(PALLAS_DZ, a.depth, a.min_gate, a.beta_min)
-            src = f"cloudnet_kenttarova_doppler_lidar_cloudbase_below_{PALLAS_DZ:.0f}m"
+            s = lidar_lowcloud_sigma(a.cb_max, a.depth, a.min_gate, a.beta_min)
+            src = f"cloudnet_kenttarova_doppler_lidar_cloudbase_below_{a.cb_max:.0f}m"
         if len(s) < 30:
             raise SystemExit(f"pallas: only {len(s)} lidar hours with Pallas in cloud; run pallas-lidar first")
         write("pallas", inputs_hours("pallas"), None, s.values, src, a)
@@ -330,6 +341,8 @@ def main():
     ap.add_argument("--depth", type=float, default=150.0, help="Pallas lidar layer bottom, m below the station")
     ap.add_argument("--years", type=int, nargs="*", default=[2023, 2024],
                     help="Pallas: lidar years to use when Pallas met and lidar do not overlap")
+    ap.add_argument("--cb-max", type=float, default=PALLAS_DZ,
+                    help="Pallas from lidar: highest cloud base counted (m above the lidar; Pallas is at 220)")
     ap.add_argument("--min-gate", type=float, default=90.0, help="lowest usable lidar gate (m above lidar)")
     ap.add_argument("--beta-min", type=float, default=2e-5, help="liquid cloud base: beta above this (sr-1 m-1)")
     a = ap.parse_args()

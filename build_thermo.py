@@ -129,7 +129,7 @@ def load_surface(site, hours):
             except Exception as ex:                                                  # noqa: BLE001
                 print(f"    skip {os.path.basename(f)}: {str(ex)[:80]}")
         if parts:
-            return _hourly(pd.concat(parts), hours), f"arm_{stream}"
+            return _hourly(pd.concat(parts), hours), f"arm_{stream}", MET_ALT.get(stream, SITE_COORDS[site][2])
     # (MET_ALT keys are the stream names; build_site reads the altitude from the returned source name)
     for cid in CLOUDNET_ALIASES.get(site, [site]):
         files = sorted(glob.glob(os.path.join(met, "cloudnet", cid, "*.nc")))
@@ -151,7 +151,7 @@ def load_surface(site, hours):
             except Exception as ex:                                                  # noqa: BLE001
                 print(f"    skip {os.path.basename(f)}: {str(ex)[:80]}")
         if parts:
-            return _hourly(pd.concat(parts), hours), f"cloudnet_{cid}_weather_station"
+            return _hourly(pd.concat(parts), hours), f"cloudnet_{cid}_weather_station", SITE_COORDS[site][2]
     f = os.path.join(met, "fmi", f"{site}.csv")
     if os.path.exists(f):
         df = pd.read_csv(f, index_col=0, parse_dates=True)
@@ -160,11 +160,19 @@ def load_surface(site, hours):
         # FMI pressure (PA_PT1H_AVG, p_sea) is reduced to sea level: back to the station's altitude
         # (Kenttarova surface p came out 38 hPa above the Cloudnet model before this)
         psl = df["PA_PT1H_AVG"] if "PA_PT1H_AVG" in df else df["P_SEA"]
-        z = SITE_COORDS[site][2]
+        z, name = SITE_COORDS[site][2], "fmi_station"
+        sj = f.replace(".csv", "_station.json")
+        if os.path.exists(sj):                       # station other than the site (Puijo: Kuopio Savilahti)
+            import json
+            with open(sj) as fh:
+                st = json.load(fh)
+            if st.get("altitude_m") is not None:
+                z = float(st["altitude_m"])
+            name = "fmi_" + st["name"].replace(" ", "_")
         P = psl * 100.0 * np.exp(-G0 * z / (287.05 * (T + 0.0065 * z / 2)))
         df = pd.DataFrame({"T": T, "RH": df["RH_PT1H_AVG"], "P": P})
-        return _hourly(df, hours), "fmi_station"
-    return None, None
+        return _hourly(df, hours), name, z
+    return None, None, None
 
 
 def load_cloudnet_model(site, hours, z_target):
@@ -196,6 +204,36 @@ def load_cloudnet_model(site, hours, z_target):
                 P[i] = np.exp(np.interp(z_target[i], z[o][ok], np.log(pp[k][o][ok])))
         except Exception as ex:                                                      # noqa: BLE001
             print(f"    skip {os.path.basename(f)}: {str(ex)[:80]}")
+    return T, P
+
+
+def moist_lapse(T, P):
+    """Saturated (pseudo-)adiabatic lapse rate (K m-1)."""
+    Lv, Rd, Rv, cp, eps = 2.501e6, 287.05, 461.5, 1004.0, 0.622
+    es = 611.2 * np.exp(17.67 * (T - 273.15) / (T - 29.65))
+    rs = eps * es / (P - es)
+    return G0 * (1 + Lv * rs / (Rd * T)) / (cp + Lv ** 2 * rs * eps / (Rd * T ** 2))
+
+
+def ascend_to_station(T, RH, P, dz, step=10.0):
+    """From the met station up dz metres to an in-cloud station: dry adiabat to the LCL, moist above it."""
+    T, P = np.asarray(T, float).copy(), np.asarray(P, float).copy()
+    a, b = 17.625, 243.04
+    tc = T - 273.15
+    g = np.log(np.clip(RH, 1, 100) / 100.0) + a * tc / (b + tc)
+    z_lcl = np.clip(125.0 * (tc - b * g / (a - g)), 0, None)
+    z = np.zeros_like(T)
+    dz = np.broadcast_to(dz, T.shape).astype(float)
+    while True:
+        left = dz - z
+        go = np.isfinite(T) & (left > 1e-6)
+        if not go.any():
+            break
+        h = np.where(go, np.minimum(step, left), 0.0)
+        lapse = np.where(z >= z_lcl, moist_lapse(T, P), G_CP)
+        Tn = T - lapse * h
+        P = P * np.exp(-G0 * h / (287.05 * 0.5 * (T + Tn)))
+        T, z = Tn, z + h
     return T, P
 
 
@@ -233,13 +271,15 @@ def build_site(site, dry_run=False, coupled_m=300.0):
     T_e, P_e = np.where(have_c, T_c, T_r), np.where(have_c, P_c, P_r)
     have_e = np.isfinite(T_e) & np.isfinite(P_e)
     msrc = np.where(have_c, "cloudnet_model", "era5")
-    sfc, ssrc = load_surface(site, hours)
+    sfc, ssrc, met_alt = load_surface(site, hours)
     if sfc is not None:
         Ts, RHs, Ps = sfc["T"].values, sfc["RH"].values, sfc["P"].values
         if kind == "insitu":
-            dz = alt - MET_ALT.get(ssrc.replace("arm_", ""), alt)     # met below the in-cloud station
-            T_s, P_s, z_lcl = surface_to_cloud_base(Ts, RHs, Ps, np.full(len(hours), dz))
+            dz = max(alt - met_alt, 0.0)          # met below the in-cloud station: dry to the LCL, moist above
+            T_s, P_s = ascend_to_station(Ts, RHs, Ps, dz) if dz > 0 else (Ts, Ps)
             z_lcl = np.full(len(hours), np.nan)
+            if dz > 0:
+                print(f"   met station {met_alt:.0f} m, carried up {dz:.0f} m to the in-cloud station")
         else:
             T_s, P_s, z_lcl = surface_to_cloud_base(Ts, RHs, Ps, cbh)
         have_s = np.isfinite(T_s) & np.isfinite(P_s)
@@ -265,7 +305,8 @@ def build_site(site, dry_run=False, coupled_m=300.0):
     T0, P0 = ds["T0"].values.copy(), ds["P0"].values.copy()
     if kind == "insitu":
         use_s, use_e = ~meas & have_s, ~meas & ~have_s & have_e
-        tag_s, tag_e = "station_met", np.char.add(msrc.astype(str), "_station")
+        tag_s = "station_met" if not ssrc.startswith("fmi_") or ssrc == "fmi_station" else f"{ssrc}_ascent"
+        tag_e = np.char.add(msrc.astype(str), "_station")
     else:
         use_s = ~meas & have_s & (coupled | ~have_e)
         use_e = ~meas & ~use_s & have_e

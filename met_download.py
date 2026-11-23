@@ -20,6 +20,7 @@ python met_download.py --dry-run
 nohup python -u met_download.py > logs/met_download.log 2>&1 &
 """
 import argparse
+import json
 import os
 import sys
 import urllib.parse
@@ -43,7 +44,12 @@ ARM_MET = {
     "bankhead": ["bnfmetM1.b1"],
 }
 # FMI stations, matched by name in FMI's station list (fmi::ef::stations) and then queried by fmisid
-FMI_STATIONS = {"puijo": ["Puijo"], "pallas": ["Sammaltunturi"], "kenttarova": ["Kenttärova"]}
+# station name parts, tried in order until one station returns data (the Puijo tower station has no open data
+# for Puijo's cloud years, so Puijo falls back to Kuopio Savilahti, a few km away at lake level)
+FMI_STATIONS = {"puijo": ["Puijo", "Savilahti"], "pallas": ["Sammaltunturi"], "kenttarova": ["Kenttärova"]}
+# altitude (m a.s.l.) of FMI stations that are not at the site's own altitude; build_thermo.py carries their
+# T, RH, p up to the site (dry adiabat to the LCL, moist above it)
+FMI_ALT = {"Kuopio Savilahti": 85.0}
 FMI_WFS = "https://opendata.fmi.fi/wfs"
 
 
@@ -168,49 +174,55 @@ def fmi(a):
         days = cloud_days(site)
         if not days:
             continue
-        cands = [(fid, names) for fid, names in stations.items()
-                 if any(k.lower() in " ".join(names).lower() for k in keys)]
+        cands = [(fid, names) for k in keys for fid, names in stations.items()
+                 if k.lower() in " ".join(names).lower()]
         if not cands:
             print(f"FMI {site}: no station matching {keys}; ERA5 will be used")
             continue
         out = os.path.join(OUT, "fmi", f"{site}.csv")
         months = sorted({pd.Period(d, "M") for d in days})
-        fid, names = cands[0]
-        if len(cands) > 1:
-            print(f"FMI {site}: several stations match {keys}: " + "; ".join(f"{f} {n[0]}" for f, n in cands) +
-                  f" -> using {fid}")
-        print(f"FMI {site:10s} station {fid} '{names[0]}', {len(months)} months with cloud days", flush=True)
+        print(f"FMI {site:10s} {len(months)} months with cloud days; stations in order: "
+              + "; ".join(f"{f} '{n[0]}'" for f, n in cands), flush=True)
         if a.dry_run or os.path.exists(out):
             continue
-        parts = []
-        for m in months:
-            try:
-                parts.append(fmi_month(fid, m.start_time, m.end_time.floor("h")))
-            except Exception as e:                                                  # noqa: BLE001
-                print(f"    {m}: {str(e)[:80]}")
-        parts = [p for p in parts if len(p) and p["value"].notna().any()]
-        if not parts:
-            # no hourly averages for this station: 10-min data, averaged to hours here, renamed to the hourly
-            # names; p_sea (sea-level pressure) is reduced to the station in build_thermo.py (column P_SEA)
-            print(f"    no hourly averages; trying 10-min observations", flush=True)
-            for m in months:
-                try:
-                    d = fmi_10min(fid, m.start_time, m.end_time.floor("h"))
-                    if len(d):
-                        d["time"] = (pd.to_datetime(d["time"]).dt.ceil("h")).astype(str)
-                        d = d.groupby(["time", "param"], as_index=False)["value"].mean()
-                        d["param"] = d["param"].map({"t2m": "TA_PT1H_AVG", "rh": "RH_PT1H_AVG", "p_sea": "P_SEA"})
-                        parts.append(d)
-                except Exception as e:                                              # noqa: BLE001
-                    print(f"    {m}: {str(e)[:80]}")
-            parts = [p for p in parts if len(p) and p["value"].notna().any()]
-        if not parts:
+        for fid, names in cands:
+            parts = fetch_station(fid, months)
+            if parts:
+                df = pd.concat(parts).pivot_table(index="time", columns="param", values="value")
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                df.to_csv(out)
+                with open(out.replace(".csv", "_station.json"), "w") as fh:
+                    json.dump({"fmisid": fid, "name": names[0], "altitude_m": FMI_ALT.get(names[0])}, fh)
+                print(f"    -> {os.path.relpath(out, HERE)}: {len(df)} hours with data from {fid} '{names[0]}'")
+                break
+            print(f"    {fid} '{names[0]}': no data for these months")
+        else:
             print(f"    FMI returned no data for {site}; ERA5 / Cloudnet model will be used")
-        if parts:
-            df = pd.concat(parts).pivot_table(index="time", columns="param", values="value")
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            df.to_csv(out)
-            print(f"    -> {os.path.relpath(out, HERE)}: {len(df)} hours with data")
+
+
+def fetch_station(fid, months):
+    """Hourly averages for the months, else 10-min observations averaged to hours (p_sea as P_SEA)."""
+    parts = []
+    for m in months:
+        try:
+            parts.append(fmi_month(fid, m.start_time, m.end_time.floor("h")))
+        except Exception as e:                                                      # noqa: BLE001
+            print(f"    {m}: {str(e)[:80]}")
+    parts = [p for p in parts if len(p) and p["value"].notna().any()]
+    if parts:
+        return parts
+    print(f"    {fid}: no hourly averages; trying 10-min observations", flush=True)
+    for m in months:
+        try:
+            d = fmi_10min(fid, m.start_time, m.end_time.floor("h"))
+            if len(d):
+                d["time"] = (pd.to_datetime(d["time"]).dt.ceil("h")).astype(str)
+                d = d.groupby(["time", "param"], as_index=False)["value"].mean()
+                d["param"] = d["param"].map({"t2m": "TA_PT1H_AVG", "rh": "RH_PT1H_AVG", "p_sea": "P_SEA"})
+                parts.append(d)
+        except Exception as e:                                                      # noqa: BLE001
+            print(f"    {m}: {str(e)[:80]}")
+    return [p for p in parts if len(p) and p["value"].notna().any()]
 
 
 def main():

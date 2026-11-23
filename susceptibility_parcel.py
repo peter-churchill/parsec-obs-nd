@@ -23,6 +23,11 @@ summary.csv (one row per site: D_Delta, S(D_Delta), S(100 nm), D_act with interv
 The observational screens are those of the inputs (build_parcel_inputs.py); the profiles therefore cover the hours
 with a spectrum and a parcel result, which can differ slightly from the published quicklook.
 
+--by station pools the sites of each sites.STATIONS group (same aerosol, Nd observed two ways: ARM NDROP and
+Cloudnet; in-cloud mountain station and Cloudnet below) into one profile, written to
+results/susceptibility_parcel/stations/; each hour keeps its own member's parcel result, and the summary gives
+the hours per Nd method (hours_ndrop, hours_cloudnet, hours_insitu).
+
 --split coupling / temperature repeats everything per coupling class (coupled: |cloud base - surface LCL| <= 300 m,
 decoupled, in-cloud station) or cloud-base temperature class (warm >= 0 C, supercooled -10..0 C, cold < -10 C),
 into results/susceptibility_parcel/<split>_<group>/, with summary_<split>.csv and split_<split>.png comparing
@@ -36,6 +41,7 @@ python susceptibility_parcel.py --n-boot 200
 python susceptibility_parcel.py --sites ena sgp hyytiala --n-boot 50
 python susceptibility_parcel.py --split coupling --n-boot 200
 python susceptibility_parcel.py --split temperature --n-boot 200
+python susceptibility_parcel.py --by station --n-boot 200      # pool sites.STATIONS (e.g. SGP = NDROP + Cloudnet)
 """
 import argparse
 import glob
@@ -49,7 +55,7 @@ import xarray as xr
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from sites import SITES  # noqa: E402
+from sites import SITES, STATIONS, station_of  # noqa: E402
 
 OUT = os.path.join(HERE, "results", "susceptibility_parcel")
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -123,7 +129,8 @@ def n_above_at(ccn, diam, dvals):
     return out
 
 
-def site_analysis(site, a, aq, group=None):
+def gather(site, a, group=None):
+    """Matched hours of one site: N(>D) matrix, observed and parcel Nd, parcel activation diameters."""
     nd_files = {wt: os.path.join(HERE, "results", f"{site}_parcel_nd_obs_{wt}.nc") for wt in ("pdf", "flux")}
     if not all(os.path.exists(f) for f in nd_files.values()):
         print(f"{site}: no weighted parcel results (run compare_nd.py first)")
@@ -144,18 +151,63 @@ def site_analysis(site, a, aq, group=None):
         c = classes(site, hours)
         keep &= (c[group[0]] == group[1]).values
     hours = hours[keep.values]
+    g = dict(site=site, hours=hours, diam=diam, ccn=ccn_df.loc[hours].to_numpy(float),
+             nd={k: v.loc[hours].to_numpy(float) for k, v in nd.items()},
+             dact={wt: parcel_dact(site, wt, a.rundir, hours).to_numpy(float) for wt in ("pdf", "flux")},
+             dact_obs=np.full(len(hours), np.nan))
+    if site == "zeppelin" and os.path.exists(os.path.join(HERE, "results", "zeppelin_activation.nc")):
+        with xr.open_dataset(os.path.join(HERE, "results", "zeppelin_activation.nc")) as d:
+            g["dact_obs"] = pd.Series(d["d_act_int"].values,
+                                      index=pd.DatetimeIndex(d["hour"].values)).reindex(hours).to_numpy(float)
+    return g
+
+
+def regrid(ccn, d_from, d_to):
+    """N(>D) rows onto another diameter grid (log-log; NaN outside)."""
+    if len(d_from) == len(d_to) and np.allclose(d_from, d_to):
+        return ccn
+    out = np.full((len(ccn), len(d_to)), np.nan)
+    for i, c in enumerate(ccn):
+        ok = np.isfinite(c) & (c > 0)
+        if ok.sum() > 1:
+            out[i] = 10 ** np.interp(np.log10(d_to), np.log10(d_from[ok]), np.log10(c[ok]), left=np.nan, right=np.nan)
+    return out
+
+
+def pool(name, parts):
+    """One station from several sites' matched hours (rows kept per site, so an hour observed both ways counts
+    twice, once per Nd method; the day-block bootstrap keeps them together)."""
+    diam = parts[0]["diam"]
+    return dict(site=name, members=[p["site"] for p in parts if len(p["hours"])],
+                hours=pd.DatetimeIndex(np.concatenate([p["hours"].values for p in parts])),
+                diam=diam, ccn=np.vstack([regrid(p["ccn"], p["diam"], diam) for p in parts]),
+                nd={k: np.concatenate([p["nd"][k] for p in parts]) for k in parts[0]["nd"]},
+                dact={wt: np.concatenate([p["dact"][wt] for p in parts]) for wt in ("pdf", "flux")},
+                dact_obs=np.concatenate([p["dact_obs"] for p in parts]),
+                method=np.concatenate([[SITES[p["site"]]["kind"]] * len(p["hours"]) for p in parts]))
+
+
+def analyse(g, a, aq, group=None):
+    site, hours, diam, ccn = g["site"], g["hours"], g["diam"], g["ccn"]
+    members = g.get("members", [site])
     if len(hours) < a.min_hours:
         print(f"{site}: only {len(hours)} matched hours{'' if group is None else ' (' + group[1] + ')'}; skipped")
         return None
-    ccn = ccn_df.loc[hours].to_numpy(float)
+    order = np.argsort(hours.values, kind="stable")          # bootstrap_by_day expects time order
+    hours, ccn = hours[order], ccn[order]
+    nd = {k: v[order] for k, v in g["nd"].items()}
     times = hours.values
     prof = pd.DataFrame({"D_nm": diam})
-    row = dict(site=site, group="all" if group is None else group[1], regime=SITES[site]["regime"],
-               kind=SITES[site]["kind"], hours=len(hours),
-               days=len(np.unique(hours.normalize())))
+    first = members[0]
+    row = dict(site=site, group="all" if group is None else group[1], regime=SITES[first]["regime"],
+               kind="+".join(sorted({SITES[m]["kind"] for m in members})), members="+".join(members),
+               hours=len(hours), days=len(np.unique(hours.normalize())))
+    if "method" in g:
+        meth = g["method"][order]
+        row.update({f"hours_{k}": int((meth == k).sum()) for k in np.unique(meth)})
     i100 = int(np.argmin(np.abs(diam - 100)))
     for key in ("obs", "parcel_pdf", "parcel_flux"):
-        y = nd[key].loc[hours].to_numpy(float)
+        y = nd[key]
         tab, dd = aq.susceptibility_table(ccn, y, diam)
         sb, db = aq.bootstrap_by_day(times, ccn, y, diam, a.n_boot)
         ci = np.array([aq._ci(sb[:, i]) for i in range(len(diam))])
@@ -168,8 +220,7 @@ def site_analysis(site, a, aq, group=None):
                     f"S100_{key}": tab["S"].values[i100], f"S100_{key}_lo": ci[i100, 0], f"S100_{key}_hi": ci[i100, 1],
                     f"Nd_median_{key}": np.median(y)})
     for wt in ("pdf", "flux"):
-        da = parcel_dact(site, wt, a.rundir, hours)
-        v = da.to_numpy(float)
+        v = g["dact"][wt][order]
         na = n_above_at(ccn, diam, v)
         ok = np.isfinite(na) & (na > 0)
         # diameter at which mean log N(>D) equals the hours' mean log N(>D_act): D_act on the D_Delta scale
@@ -181,18 +232,28 @@ def site_analysis(site, a, aq, group=None):
             d_eq = np.nan
         row.update({f"Dact_{wt}_median": np.nanmedian(v), f"Dact_{wt}_q25": np.nanpercentile(v, 25),
                     f"Dact_{wt}_q75": np.nanpercentile(v, 75), f"Dact_{wt}_closure": d_eq})
-    if site == "zeppelin" and os.path.exists(os.path.join(HERE, "results", "zeppelin_activation.nc")):
-        with xr.open_dataset(os.path.join(HERE, "results", "zeppelin_activation.nc")) as d:
-            o = pd.Series(d["d_act_int"].values, index=pd.DatetimeIndex(d["hour"].values)).reindex(hours)
-        row.update(Dact_obs_median=o.median(), Dact_obs_q25=o.quantile(.25), Dact_obs_q75=o.quantile(.75))
+    o = g["dact_obs"]
+    if np.isfinite(o).any():
+        row.update(Dact_obs_median=np.nanmedian(o), Dact_obs_q25=np.nanpercentile(o, 25),
+                   Dact_obs_q75=np.nanpercentile(o, 75))
     os.makedirs(OUT, exist_ok=True)
     prof.to_csv(os.path.join(OUT, f"{site}_profiles.csv"), index=False, float_format="%.4g")
     print(f"   [{row['group']}]", end=" ")
     print(f"{site:16s} {len(hours):5d} h  D_Delta obs {row['Dd_obs']:5.0f}  parcel pdf {row['Dd_parcel_pdf']:5.0f} "
           f"flux {row['Dd_parcel_flux']:5.0f} nm | S(D_Delta) obs {row['S_Dd_obs']:.2f} pdf {row['S_Dd_parcel_pdf']:.2f} "
           f"flux {row['S_Dd_parcel_flux']:.2f} | D_act pdf {row['Dact_pdf_median']:.0f} (closure-equiv. "
-          f"{row['Dact_pdf_closure']:.0f}) nm", flush=True)
+          f"{row['Dact_pdf_closure']:.0f}) nm" + (f"  [{row['members']}]" if len(members) > 1 else ""), flush=True)
     return row, prof
+
+
+def unit_analysis(unit, a, aq, group=None):
+    """unit: a site, or with --by station a station name whose member sites are pooled."""
+    members = STATIONS.get(unit, [unit]) if a.by == "station" else [unit]
+    parts = [p for p in (gather(m, a, group) for m in members) if p is not None]
+    if not parts:
+        return None
+    g = parts[0] if (len(parts) == 1 and a.by != "station") else pool(unit, parts)
+    return analyse(g, a, aq, group)
 
 
 def plots(rows, profs):
@@ -334,6 +395,9 @@ def main():
                     help="also compute everything per coupling class (|cloud base - LCL| <= 300 m) or per cloud-base "
                          "temperature class, into results/susceptibility_parcel/<split>_<group>/")
     ap.add_argument("--min-hours", type=int, default=30, help="minimum matched hours per site (and group)")
+    ap.add_argument("--by", choices=["site", "station"], default="site",
+                    help="station: pool the sites of each sites.STATIONS group (same aerosol, different Nd "
+                         "method) into one profile; output in results/susceptibility_parcel/stations/")
     a = ap.parse_args()
     if not a.obs_repo:
         ap.error("give --obs-repo or set OBS_REPO")
@@ -341,6 +405,9 @@ def main():
     import arm_ena_nd_pnsd as aq
     sites = a.sites or sorted({os.path.basename(f).split("_parcel_nd_obs_")[0]
                                for f in glob.glob(os.path.join(HERE, "results", "*_parcel_nd_obs_pdf.nc"))})
+    if a.by == "station":
+        sites = sorted({s if s in STATIONS else station_of(s) for s in sites})   # --sites takes sites or stations
+        OUT = os.path.join(OUT, "stations")
     base = OUT
     runs = [(None, base)] if a.split == "none" else \
         [((SPLITS[a.split][0], g), os.path.join(base, f"{a.split}_{g.split(' ')[0]}")) for g in SPLITS[a.split][1]]
@@ -351,7 +418,7 @@ def main():
             print(f"\n=== {a.split}: {group[1]} ===")
         rows, profs = [], []
         for s in sites:
-            r = site_analysis(s, a, aq, group)
+            r = unit_analysis(s, a, aq, group)
             if r:
                 rows.append(r[0])
                 profs.append(r[1])

@@ -124,6 +124,9 @@ def collect(files):
         df.insert(0, "site", site)
         rows.append(df)
     t = pd.concat(rows, ignore_index=True)
+    from sites import SITES, station_of
+    t.insert(1, "station", t["site"].map(station_of))
+    t.insert(2, "nd_method", t["site"].map(lambda s: SITES.get(s, {}).get("kind", "?")))
     t["tier"] = t["comp_source"].str.split("+").str[0]
     t["thermo"] = t["thermo_source"].str.replace(r"_(decoupled|cloud_base|station)$", r"_\1", regex=True)
     t["usable"] = (t["thermo_source"] != "placeholder") & np.isfinite(t["Nd_parcel"]) & (t["Nd_obs"] > 0)
@@ -235,10 +238,14 @@ def main():
     by_temp = summarise(ob, ["weighting", "temp"])
     by_site_coup = summarise(ob[ob["weighting"] == "flux"], ["site", "coupling"])
     by_site_temp = summarise(ob[ob["weighting"] == "flux"], ["site", "temp"])
+    multi = ob.groupby("station")["site"].transform("nunique") > 1          # stations with more than one site
+    by_station = summarise(ob, ["station", "weighting"])
+    by_station_method = summarise(ob[multi & (ob["weighting"] == "flux")], ["station", "nd_method", "site"])
     with open(os.path.join(RES, "nd_comparison_summary.csv"), "w") as fh:
         for name, d in (("by_site", by_site), ("by_composition_tier", by_tier), ("by_thermo_source", by_thermo),
                         ("by_coupling", by_coup), ("by_temperature", by_temp),
-                        ("by_site_and_coupling_flux", by_site_coup), ("by_site_and_temperature_flux", by_site_temp)):
+                        ("by_site_and_coupling_flux", by_site_coup), ("by_site_and_temperature_flux", by_site_temp),
+                        ("by_station", by_station), ("by_station_and_nd_method_flux", by_station_method)):
             fh.write(f"# {name}\n")
             d.to_csv(fh, index=False, float_format="%.3g")
     pd.set_option("display.width", 200)
@@ -246,7 +253,9 @@ def main():
     for name, d in (("By site", by_site), ("By composition tier", by_tier), ("By cloud-base T/P source", by_thermo),
                     ("By coupling (|cloud base - LCL| <= 300 m)", by_coup), ("By cloud-base temperature", by_temp),
                     ("By site and coupling, flux weighting", by_site_coup),
-                    ("By site and cloud-base temperature, flux weighting", by_site_temp)):
+                    ("By site and cloud-base temperature, flux weighting", by_site_temp),
+                    ("By station (sites with the same aerosol pooled; observed-updraft weighting)", by_station),
+                    ("Stations with two Nd methods, flux weighting", by_station_method)):
         print(f"\n{name} (parcel / observed Nd):")
         print(d.to_string(index=False, formatters=fmt, float_format="{:.0f}".format))
     zeppelin_activation(a)

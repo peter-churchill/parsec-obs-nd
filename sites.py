@@ -79,6 +79,25 @@ SITES = {
                            pnsd=("cache", "results/pnsd_cache/lasic_smps_pnsd_hourly.nc")),
 }
 
+# Stations: sites that share an aerosol record (same spectra; the Cloudnet variants of the ARM sites, Kenttarova
+# with the Pallas DMPS, Ny-Alesund with the Zeppelin DMPS) and differ only in how Nd is observed. Their parcel
+# results are pooled per station (susceptibility_parcel.py --by station, compare_nd.py by_station). The EPCAPE
+# pier and Mt Soledad stay apart: different aerosol instruments and cloud geometry. Unlisted sites are their own
+# station.
+STATIONS = {
+    "ENA": ["ena", "ena_cloudnet"],
+    "SGP": ["sgp", "sgp_cloudnet"],
+    "LASIC": ["lasic", "lasic_cloudnet"],
+    "Pallas": ["pallas", "kenttarova"],
+    "Zeppelin": ["zeppelin", "ny-alesund"],
+}
+SITE_STATION = {m: st for st, ms in STATIONS.items() for m in ms}
+
+
+def station_of(site):
+    return SITE_STATION.get(site, site)
+
+
 # (lat, lon, altitude m a.s.l.) for reanalysis look-ups (CAMS, ERA5). Mt Soledad and the pier
 # share a CAMS grid cell anyway; Cloudnet variants use their parent site.
 SITE_COORDS = {

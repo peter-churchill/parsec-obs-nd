@@ -171,11 +171,18 @@ def pallas_lidar(a):
     days = pd.DatetimeIndex(hrs.normalize().unique())
     files = get_json(f"{CLOUDNET}/files?site=kenttarova&product=doppler-lidar&dateFrom=2017-01-01"
                      f"&dateTo={pd.Timestamp.now():%Y-%m-%d}")
-    files = [f for f in files if pd.Timestamp(f["measurementDate"]) in days]
     print(f"Pallas in-cloud hours (vis < {a.vis_max:.0f} m): {len(hrs)} on {len(days)} days "
           f"({days.min():%Y-%m-%d} .. {days.max():%Y-%m-%d})")
-    print(f"Kenttarova doppler-lidar files on those days: {len(files)}, "
-          f"{sum(float(f['size']) for f in files) / 1e9:.1f} GB")
+    matched = [f for f in files if pd.Timestamp(f["measurementDate"]) in days]
+    print(f"Kenttarova doppler-lidar files on those days: {len(matched)}")
+    if matched:
+        files = matched
+    else:
+        # Pallas met ends 2015, the lidar starts 2017: take whole years instead and select the hours with
+        # the lidar's own cloud base below Pallas in build (see lidar_lowcloud_sigma)
+        files = [f for f in files if pd.Timestamp(f["measurementDate"]).year in a.years]
+        print(f"no overlap: using every lidar day in {a.years} ({len(files)} files) and the lidar cloud base")
+    print(f"to download: {len(files)} files, {sum(float(f['size']) for f in files) / 1e9:.1f} GB")
     if a.dry_run or not files:
         return
     os.makedirs(LIDAR, exist_ok=True)
@@ -211,6 +218,44 @@ def lidar_sigma(hours, z0, z1):
     g = pd.concat(rows).dropna().groupby("hour")["w"]
     s = g.std()
     return s[g.size() >= 30]
+
+
+def lidar_lowcloud_sigma(z_station, depth, min_gate, beta_min):
+    """Hours when the lidar sees liquid cloud base below the station height (station in cloud).
+
+    Per profile the cloud base is the first gate at or above min_gate with beta > beta_min; the profile counts
+    if that base is at or below z_station. Its w is the mean v from max(min_gate, base - depth) to the base.
+    Hourly sigma_w = std over the counted profiles, for hours with >= 30 of them."""
+    rows = []
+    for f in sorted(glob.glob(os.path.join(LIDAR, "*.nc"))):
+        try:
+            with xr.open_dataset(f) as ds:
+                t = pd.DatetimeIndex(ds["time"].values)
+                alt = float(np.nanmedian(ds["altitude"].values)) if "altitude" in ds else 345.0
+                z = ds["height"].values.astype(float) - alt if "height" in ds else ds["range"].values.astype(float)
+                beta = ds["beta"].values.astype(float)
+                v = ds["v"].values.astype(float)
+                ok_z = z >= min_gate
+                cloud = (beta > beta_min) & ok_z[None, :]
+                has = cloud.any(axis=1)
+                cb = np.where(has, z[np.argmax(cloud, axis=1)], np.nan)
+                sel = has & (cb <= z_station)
+                if not sel.any():
+                    continue
+                c = cb[sel][:, None]
+                m = (z[None, :] >= np.maximum(min_gate, c - depth)) & (z[None, :] < c)
+                with np.errstate(all="ignore"):
+                    w = np.nanmean(np.where(m, v[sel], np.nan), axis=1)
+                rows.append(pd.DataFrame(dict(hour=t[sel].floor("h"), w=w, cb=cb[sel])))
+        except Exception as ex:                                                      # noqa: BLE001
+            print(f"    skip {os.path.basename(f)}: {str(ex)[:80]}")
+    if not rows:
+        return pd.Series(dtype=float)
+    df = pd.concat(rows).dropna()
+    g = df.groupby("hour")
+    s = g["w"].std()[g.size() >= 30]
+    print(f"    lidar low-cloud hours: {len(s)} (median cloud base {df.cb.median():.0f} m above the lidar)")
+    return s
 
 
 def write(site, hours, sigma_hourly, clim, src, a):
@@ -265,10 +310,13 @@ def build(a):
     if "pallas" in sites:
         ch, _ = cloud_hours("pallas", a.vis_max)
         s = lidar_sigma(ch, PALLAS_DZ - a.depth, PALLAS_DZ - a.top)
+        src = f"cloudnet_kenttarova_doppler_lidar_{PALLAS_DZ - a.depth:.0f}-{PALLAS_DZ - a.top:.0f}m_pallas_incloud"
+        if len(s) < 30:                         # no met/lidar overlap: lidar cloud base below Pallas instead
+            s = lidar_lowcloud_sigma(PALLAS_DZ, a.depth, a.min_gate, a.beta_min)
+            src = f"cloudnet_kenttarova_doppler_lidar_cloudbase_below_{PALLAS_DZ:.0f}m"
         if len(s) < 30:
             raise SystemExit(f"pallas: only {len(s)} lidar hours with Pallas in cloud; run pallas-lidar first")
-        write("pallas", inputs_hours("pallas"), s, s.values,
-              f"cloudnet_kenttarova_doppler_lidar_{PALLAS_DZ - a.depth:.0f}-{PALLAS_DZ - a.top:.0f}m_pallas_incloud", a)
+        write("pallas", inputs_hours("pallas"), None, s.values, src, a)
 
 
 def main():
@@ -280,6 +328,10 @@ def main():
     ap.add_argument("--min-r2", type=float, default=0.0, help="Puijo FORCES: minimum r2 column value")
     ap.add_argument("--top", type=float, default=0.0, help="Pallas lidar layer top, m below the station height")
     ap.add_argument("--depth", type=float, default=150.0, help="Pallas lidar layer bottom, m below the station")
+    ap.add_argument("--years", type=int, nargs="*", default=[2023, 2024],
+                    help="Pallas: lidar years to use when Pallas met and lidar do not overlap")
+    ap.add_argument("--min-gate", type=float, default=90.0, help="lowest usable lidar gate (m above lidar)")
+    ap.add_argument("--beta-min", type=float, default=2e-5, help="liquid cloud base: beta above this (sr-1 m-1)")
     a = ap.parse_args()
     {"download": download, "inspect": inspect, "pallas-lidar": pallas_lidar, "build": build}[a.step](a)
 

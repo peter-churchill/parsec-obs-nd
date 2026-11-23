@@ -86,7 +86,7 @@ def read_csv(name):
     df.columns = [str(c).strip() for c in df.columns]
     tcol = next((c for c in df.columns if any(k in c.lower() for k in ("time", "date"))), df.columns[0])
     t = df[tcol]
-    if np.issubdtype(t.dtype, np.number):
+    if pd.api.types.is_numeric_dtype(t):
         v = t.astype(float)
         if v.median() > 7e5:                                   # MATLAB datenum
             t = pd.to_datetime(v - 719529, unit="D")
@@ -95,7 +95,11 @@ def read_csv(name):
         else:
             raise ValueError(f"{name}: cannot interpret numeric time column {tcol!r}")
     else:
-        t = pd.to_datetime(t, errors="coerce", dayfirst=False)
+        t = t.astype(str).str.strip()
+        p = pd.to_datetime(t, format="%d.%m.%Y %H:%M:%S", errors="coerce")   # Zenodo files: 12.04.2000 08:00:00
+        if p.isna().mean() > 0.5:
+            p = pd.to_datetime(t, errors="coerce")
+        t = p
     df.index = pd.DatetimeIndex(t).round("min").floor("h")   # datenum float error
     df = df.drop(columns=[tcol])
     df = df.apply(pd.to_numeric, errors="coerce")

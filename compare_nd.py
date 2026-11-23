@@ -4,7 +4,8 @@
 1. For each site with runs/<site>/chunk_*.csv, weight_updrafts.py is run with updrafts/<site>_w_cloudbase.nc,
    once with "pdf" and once with "flux" weighting. Extra variants:
      zeppelin       the station updraft with its observed mean, and with mean 0 (sigma_w only)
-     puijo, pallas  fixed sigma_w at the 10th and 90th percentiles of the boreal lidar sites (bounds)
+     puijo, pallas  fixed sigma_w at the 10th and 90th percentiles of the station climatology from
+                    paper_updrafts.py (else the boreal lidar sites, BOUNDS)
 2. All results/<site>_parcel_nd_*.nc are collected into results/nd_comparison_hours.csv (one row per site,
    variant and hour) and summarised in results/nd_comparison_summary.csv: hours, median parcel/observed ratio
    and its interquartile range, and the correlation of log Nd, per site and variant, and per composition tier
@@ -85,7 +86,12 @@ def run_weighting(site, a):
         d.attrs["w_source"] = "zeppelin_station_5min_zero_mean"
         d.to_netcdf(z)
         variants.append(("zeromean", ["--w-file", z]))
-    for s in BOUNDS.get(site, ()):
+    bounds = BOUNDS.get(site, ())
+    if site in BOUNDS and os.path.exists(wf):            # paper_updrafts.py stores the station's own 10/90 %
+        with xr.open_dataset(wf) as d:
+            if "sigma_w_p10" in d.attrs:
+                bounds = (round(float(d.attrs["sigma_w_p10"]), 2), round(float(d.attrs["sigma_w_p90"]), 2))
+    for s in bounds:
         variants.append((f"sigma{s:g}", ["--sigma-w", str(s)]))
     for tag, args in variants:
         for wt in ("pdf", "flux"):

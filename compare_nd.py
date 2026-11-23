@@ -209,12 +209,107 @@ def plot(t):
     print(f"-> {os.path.relpath(out, HERE)}")
 
 
+COLOUR_BY = {
+    "coupling": {"coupled": "#1f77b4", "decoupled": "#d62728", "in-cloud station": "#2ca02c", "unknown": "0.55"},
+    "temp": {"warm (>= 0 C)": "#d62728", "supercooled (-10..0 C)": "#1f77b4", "cold (< -10 C)": "#9467bd"},
+}
+
+
+def site_scatter(t, weighting="flux", colour_by="none", outdir=None):
+    """Observed vs parcel Nd per site (observed-updraft variant, usable hours): one panel per site in
+    results/nd_scatter_<weighting>.png, and one file per site in results/nd_scatter/<site>_<weighting>.png.
+    Each panel: 1:1 (solid) and factor-2 (dotted) lines, n, median parcel/observed ratio with IQR, Pearson r
+    of log Nd, and the log-log regression slope (OLS of log parcel on log observed)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    outdir = outdir or RES
+    u = t[t["usable"] & (t["variant"] == "obs") & (t["weighting"] == weighting)]
+    u = u[(u["Nd_obs"] > 0) & (u["Nd_parcel"] > 0)]
+    sites = sorted(u["site"].unique())
+    if not sites:
+        return
+    cmap = COLOUR_BY.get(colour_by)
+
+    def panel(ax, g, site):
+        x, y = g["Nd_obs"].to_numpy(float), g["Nd_parcel"].to_numpy(float)
+        lo = 10 ** np.floor(np.log10(min(x.min(), y.min())))
+        hi = 10 ** np.ceil(np.log10(max(x.max(), y.max())))
+        a = 0.6 if len(g) < 300 else 0.35 if len(g) < 2000 else 0.2
+        if cmap:
+            for k, c in cmap.items():
+                m = (g[colour_by] == k).to_numpy()
+                if m.any():
+                    ax.scatter(x[m], y[m], s=6, color=c, alpha=a, lw=0, rasterized=True)
+        else:
+            ax.scatter(x, y, s=6, color="#1f77b4", alpha=a, lw=0, rasterized=True)
+        ax.plot([lo, hi], [lo, hi], "k-", lw=0.8)
+        for f in (0.5, 2):
+            ax.plot([lo, hi], [lo * f, hi * f], "k:", lw=0.6)
+        lx, ly = np.log10(x), np.log10(y)
+        r = np.corrcoef(lx, ly)[0, 1] if len(g) > 2 else np.nan
+        slope = np.polyfit(lx, ly, 1)[0] if len(g) > 2 else np.nan
+        q = np.log10(y / x)
+        ax.text(0.03, 0.97, f"n = {len(g)}\nratio {10 ** np.median(q):.2f} ({10 ** np.percentile(q, 25):.2f}-"
+                f"{10 ** np.percentile(q, 75):.2f})\nr(log) = {r:.2f}, slope {slope:.2f}",
+                transform=ax.transAxes, va="top", fontsize=7.5,
+                bbox=dict(boxstyle="round", fc="white", ec="0.8", alpha=0.85))
+        ax.set(xscale="log", yscale="log", xlim=(lo, hi), ylim=(lo, hi), title=site)
+        ax.set_aspect("equal")
+        ax.grid(alpha=0.3, which="major")
+
+    handles = [Line2D([], [], marker="o", ls="", color=c, label=k) for k, c in cmap.items()] if cmap else []
+    note = f"; colour: {colour_by}" if cmap else ""
+    nc = 5
+    nr = int(np.ceil(len(sites) / nc))
+    fig, axs = plt.subplots(nr, nc, figsize=(3.2 * nc, 3.3 * nr), squeeze=False)
+    for ax, site in zip(axs.flat, sites):
+        panel(ax, u[u["site"] == site], site)
+    for ax in axs.flat[len(sites):]:
+        ax.set_visible(False)
+    for ax in axs[:, 0]:
+        ax.set_ylabel("parcel Nd (cm$^{-3}$)")
+    for ax in axs[-1]:
+        ax.set_xlabel("observed Nd (cm$^{-3}$)")
+    if handles:
+        fig.legend(handles=handles, loc="lower right", fontsize=8, markerscale=1.5)
+    fig.suptitle(f"Parcel vs observed Nd per site, {weighting} weighting (1:1 solid, factor 2 dotted{note})")
+    fig.tight_layout()
+    path = os.path.join(outdir, f"nd_scatter_{weighting}.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    d = os.path.join(outdir, "nd_scatter")
+    os.makedirs(d, exist_ok=True)
+    for site in sites:
+        fig, ax = plt.subplots(figsize=(4.6, 4.6))
+        panel(ax, u[u["site"] == site], f"{site}, {weighting} weighting")
+        ax.set(xlabel="observed Nd (cm$^{-3}$)", ylabel="parcel Nd (cm$^{-3}$)")
+        if handles:
+            ax.legend(handles=handles, fontsize=7, loc="lower right")
+        fig.tight_layout()
+        fig.savefig(os.path.join(d, f"{site}_{weighting}.png"), dpi=150)
+        plt.close(fig)
+    print(f"-> {os.path.relpath(path, HERE)}, results/nd_scatter/<site>_{weighting}.png")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sites", nargs="*")
     ap.add_argument("--rundir", default=os.path.join(HERE, "runs"))
     ap.add_argument("--skip-weighting", action="store_true", help="use the result files already there")
+    ap.add_argument("--scatter-only", action="store_true",
+                    help="only redraw the per-site scatter plots from results/nd_comparison_hours.csv")
+    ap.add_argument("--colour-by", choices=["none", "coupling", "temp"], default="none",
+                    help="colour the per-site scatter points by coupling or cloud-base temperature class")
     a = ap.parse_args()
+    if a.scatter_only:
+        t = pd.read_csv(os.path.join(RES, "nd_comparison_hours.csv"))
+        if a.sites:
+            t = t[t["site"].isin(a.sites)]
+        for wt in ("flux", "pdf"):
+            site_scatter(t, wt, a.colour_by)
+        return
     os.makedirs(RES, exist_ok=True)
     sites = a.sites or sorted(d for d in os.listdir(a.rundir) if glob.glob(os.path.join(a.rundir, d, "chunk_*.csv")))
     files = []
@@ -260,6 +355,8 @@ def main():
         print(d.to_string(index=False, formatters=fmt, float_format="{:.0f}".format))
     zeppelin_activation(a)
     plot(t)
+    for wt in ("flux", "pdf"):
+        site_scatter(t, wt, a.colour_by)
     print("-> results/nd_comparison_hours.csv, results/nd_comparison_summary.csv")
 
 

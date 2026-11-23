@@ -20,6 +20,11 @@ python paper_updrafts.py pallas-lidar --dry-run  # Kenttarova lidar days with Pa
 python paper_updrafts.py pallas-lidar            # download them -> data/updraft/cloudnet/kenttarova/
 python paper_updrafts.py build                   # updrafts/{puijo,pallas}_w_cloudbase.nc
 
+Outcome (2026-11-23): Puijo gets the FORCES climatology (261 h, sigma_w 0.22/0.41/0.67), almost the same as
+the pooled fallback. Pallas keeps the pooled fallback from build_updrafts.py: the Cloudnet Kenttarova
+doppler-lidar files have 120-m gates (first valid at ~180 m above the lidar) and show cloud base below 500 m in
+<0.02 % of 2023-2024 profiles (lidar-diag), so they cannot sample the layer below cloud when Pallas is in cloud.
+
 build writes the same variables as build_updrafts.py (sigma_w, w_mean = 0, hour_source, ...), with sigma_w
 the median of the station's in-cloud hourly sigma_w and the 10/90 % values in the attributes and the log, to
 use as --sigma-w bounds in weight_updrafts.py / compare_nd.py. Run it after build_updrafts.py (which would
@@ -40,6 +45,7 @@ import warnings
 import xarray as xr
 
 warnings.filterwarnings("ignore", message="Mean of empty slice")
+warnings.filterwarnings("ignore", message="All-NaN slice")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

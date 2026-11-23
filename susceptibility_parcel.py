@@ -206,6 +206,12 @@ def analyse(g, a, aq, group=None):
         meth = g["method"][order]
         row.update({f"hours_{k}": int((meth == k).sum()) for k in np.unique(meth)})
     i100 = int(np.argmin(np.abs(diam - 100)))
+    ntot = ccn[:, int(np.nanargmin(diam))]                   # N(>smallest diameter) = total number of the spectrum
+    ntot = ntot[np.isfinite(ntot) & (ntot > 0)]
+    if len(ntot):
+        row.update(Ntot_median=np.median(ntot), Ntot_q25=np.percentile(ntot, 25), Ntot_q75=np.percentile(ntot, 75),
+                   Ntot_Dmin_nm=float(np.nanmin(diam)),
+                   N100_median=np.nanmedian(ccn[:, i100]))
     for key in ("obs", "parcel_pdf", "parcel_flux"):
         y = nd[key]
         tab, dd = aq.susceptibility_table(ccn, y, diam)
@@ -302,48 +308,134 @@ def plots(rows, profs):
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, "profiles.png"), dpi=140)
 
-    t = pd.DataFrame(rows)
-    reg = {"Marine": "#1f77b4", "Boreal": "#2ca02c", "Arctic": "#9467bd", "Continental": "#d62728"}
-    fig, ax = plt.subplots(figsize=(9, 6.5))
-    for _, r in t.iterrows():
-        c = reg.get(r["regime"], "0.5")
-        xo, yo, xp, yp = r["Dd_obs"], r["S_Dd_obs"], r["Dd_parcel_pdf"], r["S_Dd_parcel_pdf"]
-        if np.isfinite(xo) and np.isfinite(xp):
-            ax.annotate("", (xp, yp), (xo, yo), arrowprops=dict(arrowstyle="->", color=c, lw=0.8, alpha=0.7))
-        ax.plot(xo, yo, "o", color=c, mec="k", ms=7)
-        ax.plot(xp, yp, "o", mfc="white", mec=c, ms=7, mew=1.5)
-        ax.annotate(r["site"], (xo, yo), xytext=(4, 4), textcoords="offset points", fontsize=7)
-    ax.axhline(0, color="0.6", lw=0.8)
-    ax.axhline(1, color="0.6", lw=0.8, ls=":")
-    logx(ax)
-    ax.set(xlabel="closure diameter D$_\\Delta$ (nm)", ylabel="S(D$_\\Delta$)",
-           title="S(D$_\\Delta$) vs D$_\\Delta$: observed (filled) and parcel, pdf weighting (open), same hours")
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "s_at_ddelta.png"), dpi=150)
+    comparison_figures(pd.DataFrame(rows), OUT)
+    print(f"-> {os.path.relpath(OUT, HERE)}/profiles.png, s_at_ddelta.png, ddelta_vs_dact.png, ddelta_vs_ntot.png")
 
-    fig, ax = plt.subplots(figsize=(6.5, 6))
-    for _, r in t.iterrows():
-        c = reg.get(r["regime"], "0.5")
-        x = r["Dact_pdf_closure"]
-        ax.plot(x, r["Dd_obs"], "o", color=c, mec="k", ms=7)
-        ax.plot(x, r["Dd_parcel_pdf"], "o", mfc="white", mec=c, ms=7, mew=1.5)
-        ax.annotate(r["site"], (x, r["Dd_obs"]), xytext=(4, 3), textcoords="offset points", fontsize=7)
-        if np.isfinite(r.get("Dact_obs_median", np.nan)):
-            ax.plot(r["Dact_obs_median"], r["Dd_obs"], "*", color=c, mec="k", ms=12)
-    lim = [15, 350]
-    ax.plot(lim, lim, "k-", lw=0.8)
-    logx(ax)
-    ax.set_yscale("log")
-    ax.yaxis.set_major_locator(FixedLocator([20, 50, 100, 200, 300]))
-    ax.yaxis.set_major_formatter(ScalarFormatter())
-    ax.set(xlim=lim, ylim=lim, xlabel="activation diameter (nm): parcel, closure-equivalent (star: observed, Zeppelin)",
-           ylabel="closure diameter D$_\\Delta$ (nm)",
-           title="D$_\\Delta$ observed (filled) and parcel (open) vs activation diameter")
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "ddelta_vs_dact.png"), dpi=150)
-    print(f"-> {os.path.relpath(OUT, HERE)}/profiles.png, s_at_ddelta.png, ddelta_vs_dact.png")
+
+REGIME_COLOURS = {"Marine": "#1f77b4", "Boreal": "#2ca02c", "Arctic": "#9467bd", "Continental": "#d62728"}
+
+
+def _err(t, c, lo, hi):
+    """asymmetric error bars (2, n) from CI columns, NaN-safe and non-negative"""
+    if lo not in t or hi not in t:
+        return None
+    e = np.vstack([t[c] - t[lo], t[hi] - t[c]]).astype(float)
+    return np.where(np.isfinite(e), np.clip(e, 0, None), 0)
+
+
+def _spearman(x, y):
+    from scipy.stats import spearmanr
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 4:
+        return ""
+    r, p = spearmanr(x[ok], y[ok])
+    return f"Spearman ρ = {r:.2f} (p = {p:.2g}, n = {ok.sum()})"
+
+
+def comparison_figures(t, out):
+    """Observed (left) and parcel (right) side by side, same axes, one point per site coloured by regime:
+    s_at_ddelta.png     S(D_Delta) vs D_Delta, with day-block bootstrap 95 % intervals on both
+    ddelta_vs_dact.png  D_Delta vs the parcel activation diameter (closure-equivalent), 1:1 line;
+                        observed activation diameter as a star where one exists (Zeppelin)
+    ddelta_vs_ntot.png  D_Delta vs aerosol loading: median total number N(>D_min) of the matched hours (IQR bars)
+    Parcel panels show pdf weighting (filled) and flux weighting (open)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import FixedLocator, NullFormatter, ScalarFormatter
+
+    def logax(ax, which="x", ticks=(20, 50, 100, 200, 300)):
+        getattr(ax, f"set_{which}scale")("log")
+        a = ax.xaxis if which == "x" else ax.yaxis
+        a.set_major_locator(FixedLocator(list(ticks)))
+        a.set_major_formatter(ScalarFormatter())
+        a.set_minor_formatter(NullFormatter())
+
+    t = t.reset_index(drop=True)
+    col = [REGIME_COLOURS.get(r, "0.5") for r in t["regime"]]
+    reg_handles = [Line2D([], [], marker="o", ls="", color=c, mec="k", label=r) for r, c in REGIME_COLOURS.items()
+                   if r in set(t["regime"])]
+    wt_handles = [Line2D([], [], marker="o", ls="", color="0.4", mec="k", label="pdf weighting"),
+                  Line2D([], [], marker="s", ls="", mfc="white", mec="0.4", mew=1.5, label="flux weighting")]
+    ekw = dict(ls="", elinewidth=0.7, capsize=0, alpha=0.6, zorder=1)
+
+    def points(ax, x, y, xe=None, ye=None, marker="o", filled=True, label=True):
+        for i in range(len(t)):
+            if not (np.isfinite(x[i]) and np.isfinite(y[i])):
+                continue
+            ax.errorbar(x[i], y[i], xerr=None if xe is None else xe[:, [i]], yerr=None if ye is None else ye[:, [i]],
+                        color=col[i], **ekw)
+            ax.plot(x[i], y[i], marker, color=col[i] if filled else "white", mec="k" if filled else col[i],
+                    mew=0.8 if filled else 1.5, ms=7, zorder=3)
+            if label:
+                ax.annotate(t["site"][i], (x[i], y[i]), xytext=(4, 3), textcoords="offset points", fontsize=6.5)
+
+    def finish(fig, axs, name, title):
+        axs[0].legend(handles=reg_handles, fontsize=7, loc="best")
+        axs[1].legend(handles=reg_handles + wt_handles, fontsize=7, loc="best")
+        for ax in axs:
+            ax.grid(alpha=0.3)
+        fig.suptitle(title, fontsize=11)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out, name), dpi=150)
+        plt.close(fig)
+
+    g = lambda c: t[c].to_numpy(float) if c in t else np.full(len(t), np.nan)
+
+    # --- S(D_Delta) vs D_Delta
+    fig, axs = plt.subplots(1, 2, figsize=(13, 5.8), sharex=True, sharey=True)
+    points(axs[0], g("Dd_obs"), g("S_Dd_obs"), _err(t, "Dd_obs", "Dd_obs_lo", "Dd_obs_hi"),
+           _err(t, "S_Dd_obs", "S_Dd_obs_lo", "S_Dd_obs_hi"))
+    for k, m, f in (("parcel_pdf", "o", True), ("parcel_flux", "s", False)):
+        points(axs[1], g(f"Dd_{k}"), g(f"S_Dd_{k}"), _err(t, f"Dd_{k}", f"Dd_{k}_lo", f"Dd_{k}_hi"),
+               _err(t, f"S_Dd_{k}", f"S_Dd_{k}_lo", f"S_Dd_{k}_hi"), m, f, label=f)
+    for ax, ttl in zip(axs, ("observed", "parcel model")):
+        ax.axhline(0, color="0.6", lw=0.8)
+        ax.axhline(1, color="0.6", lw=0.8, ls=":")
+        logax(ax)
+        ax.set(xlabel="closure diameter D$_\\Delta$ (nm)", title=ttl)
+    axs[0].set_ylabel("S(D$_\\Delta$)")
+    finish(fig, axs, "s_at_ddelta.png", "Susceptibility at the closure diameter (bars: 95 % day-block bootstrap)")
+
+    # --- D_Delta vs activation diameter
+    lim = [15, 400]
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5.8), sharex=True, sharey=True)
+    points(axs[0], g("Dact_pdf_closure"), g("Dd_obs"), None, _err(t, "Dd_obs", "Dd_obs_lo", "Dd_obs_hi"))
+    zx, zy = g("Dact_obs_median"), g("Dd_obs")
+    for i in range(len(t)):
+        if np.isfinite(zx[i]) and np.isfinite(zy[i]):
+            axs[0].plot(zx[i], zy[i], "*", color=col[i], mec="k", ms=14, zorder=4)
+            axs[0].annotate("observed D$_{act}$", (zx[i], zy[i]), xytext=(4, -10), textcoords="offset points", fontsize=6.5)
+    for k, wt, m, f in (("parcel_pdf", "pdf", "o", True), ("parcel_flux", "flux", "s", False)):
+        points(axs[1], g(f"Dact_{wt}_closure"), g(f"Dd_{k}"), None, _err(t, f"Dd_{k}", f"Dd_{k}_lo", f"Dd_{k}_hi"),
+               m, f, label=f)
+    axs[0].set_title("observed D$_\\Delta$\n" + _spearman(g("Dact_pdf_closure"), g("Dd_obs")), fontsize=9)
+    axs[1].set_title("parcel D$_\\Delta$\n" + _spearman(g("Dact_pdf_closure"), g("Dd_parcel_pdf")) + " (pdf)", fontsize=9)
+    for ax in axs:
+        ax.plot(lim, lim, "k-", lw=0.8)
+        logax(ax, "x")
+        logax(ax, "y")
+        ax.set(xlim=lim, ylim=lim, xlabel="parcel activation diameter, closure-equivalent (nm)")
+    axs[0].set_ylabel("closure diameter D$_\\Delta$ (nm)")
+    finish(fig, axs, "ddelta_vs_dact.png", "Closure diameter vs activation diameter (1:1 line; star: observed activation diameter)")
+
+    # --- D_Delta vs aerosol loading
+    x = g("Ntot_median")
+    xe = _err(t, "Ntot_median", "Ntot_q25", "Ntot_q75")
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5.8), sharex=True, sharey=True)
+    points(axs[0], x, g("Dd_obs"), xe, _err(t, "Dd_obs", "Dd_obs_lo", "Dd_obs_hi"))
+    for k, m, f in (("parcel_pdf", "o", True), ("parcel_flux", "s", False)):
+        points(axs[1], x, g(f"Dd_{k}"), xe, _err(t, f"Dd_{k}", f"Dd_{k}_lo", f"Dd_{k}_hi"), m, f, label=f)
+    axs[0].set_title("observed\n" + _spearman(x, g("Dd_obs")), fontsize=9)
+    axs[1].set_title("parcel model\n" + _spearman(x, g("Dd_parcel_pdf")) + " (pdf)", fontsize=9)
+    dmin = np.nanmedian(g("Ntot_Dmin_nm"))
+    for ax in axs:
+        ax.set_xscale("log")
+        logax(ax, "y")
+        ax.set(ylim=lim, xlabel=f"aerosol loading N$_{{tot}}$ (N > {dmin:.0f} nm, cm$^{{-3}}$; median, IQR bars)")
+    axs[0].set_ylabel("closure diameter D$_\\Delta$ (nm)")
+    finish(fig, axs, "ddelta_vs_ntot.png", "Closure diameter vs aerosol loading")
 
 
 SPLITS = {"coupling": ("coupling", ["coupled", "decoupled", "in-cloud station"]),
@@ -395,10 +487,20 @@ def main():
                     help="also compute everything per coupling class (|cloud base - LCL| <= 300 m) or per cloud-base "
                          "temperature class, into results/susceptibility_parcel/<split>_<group>/")
     ap.add_argument("--min-hours", type=int, default=30, help="minimum matched hours per site (and group)")
+    ap.add_argument("--plots-only", action="store_true",
+                    help="redraw s_at_ddelta / ddelta_vs_dact / ddelta_vs_ntot from the existing summary.csv")
     ap.add_argument("--by", choices=["site", "station"], default="site",
                     help="station: pool the sites of each sites.STATIONS group (same aerosol, different Nd "
                          "method) into one profile; output in results/susceptibility_parcel/stations/")
     a = ap.parse_args()
+    if a.plots_only:
+        out = os.path.join(OUT, "stations") if a.by == "station" else OUT
+        t = pd.read_csv(os.path.join(out, "summary.csv"))
+        if "Ntot_median" not in t:
+            print("summary.csv has no Ntot_median yet: rerun once without --plots-only for ddelta_vs_ntot.png")
+        comparison_figures(t, out)
+        print(f"-> {os.path.relpath(out, HERE)}/s_at_ddelta.png, ddelta_vs_dact.png, ddelta_vs_ntot.png")
+        return
     if not a.obs_repo:
         ap.error("give --obs-repo or set OBS_REPO")
     sys.path.insert(0, a.obs_repo)

@@ -16,7 +16,8 @@ Cloudnet radar (categorize; sites without lidar): Doppler velocity in non-drizzl
   from cloud base to --radar-depth m above it, see radar_site().
   Radar sigma_w is divided by RADAR_TO_LIDAR (1.19, the median radar/lidar ratio where both exist), since the
   in-cloud radar layer is more turbulent than the sub-cloud lidar layer; sigma_w_radar_raw keeps the original.
-Fallback (Puijo, Pallas: neither): one sigma_w for all hours, the median of the boreal lidar sites' lidar hours.
+Puijo, Pallas: station climatology from paper_updrafts.py (the paper's Zenodo / Kenttarova lidar data), kept
+  if present; otherwise (or with --fallback) one sigma_w for all hours, the median of the boreal lidar sites' hours.
 
 Writes updrafts/<site>_w_cloudbase.nc (sigma_w, w_mean, n, sigma_w_cb; w samples for Cloudnet lidar) with
 w_source. Zeppelin's file comes from zeppelin_bolin.py and is left alone; the Ny-Alesund radar on
@@ -265,6 +266,8 @@ def main():
     ap.add_argument("--zmax", type=float, default=-20.0, help="max radar reflectivity (dBZ) for non-drizzling gates")
     ap.add_argument("--radar-scale", type=float, default=RADAR_TO_LIDAR,
                     help="divide radar sigma_w by this (radar/lidar ratio where both exist; 1 = no scaling)")
+    ap.add_argument("--fallback", action="store_true",
+                    help="Puijo/Pallas: overwrite the paper_updrafts.py files with the pooled lidar fallback")
     a = ap.parse_args()
     sites = a.sites or (sorted(set(ARM_STREAMS) | set(CLOUDNET_SITES) | set(CLOUDNET_RADAR_SITES) - set(FALLBACK))
                         + sorted(FALLBACK))                 # fallbacks last: they pool the lidar sites' results
@@ -279,6 +282,13 @@ def main():
         if site in ARM_STREAMS:
             r = arm_site(site, hours, cbh, a)
         elif site in FALLBACK:
+            q = os.path.join(HERE, "updrafts", f"{site}_w_cloudbase.nc")
+            if os.path.exists(q) and not a.fallback:
+                with xr.open_dataset(q) as d:
+                    paper = not str(d.attrs.get("w_source", "")).startswith("regime_fallback")
+                if paper:                                   # from paper_updrafts.py: keep it
+                    print(f"{site}: keeping {os.path.basename(q)} from paper_updrafts.py (--fallback to replace)")
+                    continue
             r = fallback_site(site, hours)
         elif site in CLOUDNET_SITES:
             r = combine(cloudnet_site(site, hours, cbh, a), radar_site(site, hours, cbh, a), hours)

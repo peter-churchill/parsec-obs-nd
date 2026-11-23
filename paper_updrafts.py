@@ -269,6 +269,45 @@ def lidar_lowcloud_sigma(z_station, depth, min_gate, beta_min):
     return s
 
 
+def lidar_diag(a):
+    """Cloud-base height distribution in the lidar files for several beta thresholds and lowest gates, to pick
+    --beta-min / --min-gate. Also the median beta profile of the lowest gates (near-range artefacts)."""
+    files = sorted(glob.glob(os.path.join(LIDAR, "*.nc")))[::a.every]
+    thr = [2e-5, 1e-4, 3e-4, 1e-3]
+    gates = [90, 150, 250]
+    edges = [0, 150, 220, 350, 500, 1000, 2000, 1e5]
+    counts = {(b, g): np.zeros(len(edges) - 1, int) for b in thr for g in gates}
+    zprof, bprof = None, []
+    n = 0
+    for f in files:
+        try:
+            with xr.open_dataset(f) as ds:
+                alt = float(np.nanmedian(ds["altitude"].values)) if "altitude" in ds else 345.0
+                z = ds["height"].values.astype(float) - alt if "height" in ds else ds["range"].values.astype(float)
+                beta = ds["beta"].values.astype(float)
+        except Exception as ex:                                                      # noqa: BLE001
+            print(f"    skip {os.path.basename(f)}: {str(ex)[:80]}")
+            continue
+        n += len(beta)
+        low = z < 600
+        zprof = z[low]
+        bprof.append(np.nanmedian(beta[:, low], axis=0))
+        for b in thr:
+            for g in gates:
+                c = (beta > b) & (z >= g)[None, :]
+                has = c.any(axis=1)
+                cb = z[np.argmax(c, axis=1)][has]
+                counts[(b, g)] += np.histogram(cb, edges)[0]
+    print(f"{len(files)} files, {n} profiles. Cloud-base counts per bin (m above lidar; Pallas at {PALLAS_DZ:.0f}):")
+    lab = [f"{edges[i]:.0f}-{edges[i + 1]:.0f}" for i in range(len(edges) - 2)] + [f">{edges[-2]:.0f}"]
+    rows = {f"beta>{b:.0e} gate>={g}": counts[(b, g)] for b in thr for g in gates}
+    print(pd.DataFrame(rows, index=lab).T.to_string())
+    if bprof:
+        mb = np.nanmedian(np.array(bprof), axis=0)
+        print("median beta (sr-1 m-1) by height, lowest 600 m:")
+        print("  " + ", ".join(f"{zz:.0f}:{bb:.1e}" for zz, bb in zip(zprof, mb)))
+
+
 def write(site, hours, sigma_hourly, clim, src, a):
     """sigma_w per hour: matched value where available, else the climatological median."""
     q10, q50, q90 = np.percentile(clim, [10, 50, 90])
@@ -332,7 +371,7 @@ def build(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["download", "inspect", "pallas-lidar", "build"])
+    ap.add_argument("step", choices=["download", "inspect", "pallas-lidar", "lidar-diag", "build"])
     ap.add_argument("--sites", nargs="*")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--vis-max", type=float, default=200.0, help="in-cloud: station visibility below this (m)")
@@ -343,10 +382,12 @@ def main():
                     help="Pallas: lidar years to use when Pallas met and lidar do not overlap")
     ap.add_argument("--cb-max", type=float, default=PALLAS_DZ,
                     help="Pallas from lidar: highest cloud base counted (m above the lidar; Pallas is at 220)")
+    ap.add_argument("--every", type=int, default=3, help="lidar-diag: use every n-th file")
     ap.add_argument("--min-gate", type=float, default=90.0, help="lowest usable lidar gate (m above lidar)")
     ap.add_argument("--beta-min", type=float, default=2e-5, help="liquid cloud base: beta above this (sr-1 m-1)")
     a = ap.parse_args()
-    {"download": download, "inspect": inspect, "pallas-lidar": pallas_lidar, "build": build}[a.step](a)
+    {"download": download, "inspect": inspect, "pallas-lidar": pallas_lidar, "lidar-diag": lidar_diag,
+     "build": build}[a.step](a)
 
 
 if __name__ == "__main__":

@@ -40,9 +40,12 @@ module purge
 conda activate "$CONDA_ENV"
 
 cd "$REPO"
-python -u parsec_run.py \
-    --inputs "inputs/${SITE}_parcel_inputs.nc" \
-    --parsec "$PARSEC_DIR" \
-    --chunk-hours "$CHUNK" \
-    --task "$SLURM_ARRAY_TASK_ID" \
-    --outdir "${OUTDIR:-runs}" ${EXTRA:-}
+for attempt in 1 2 3; do
+    python -u parsec_run.py \
+        --inputs "inputs/${SITE}_parcel_inputs.nc" \
+        --parsec "$PARSEC_DIR" \
+        --chunk-hours "$CHUNK" \
+        --task "$SLURM_ARRAY_TASK_ID" \
+        --outdir "${OUTDIR:-runs}" ${EXTRA:-} && break
+    echo "attempt $attempt crashed (rc $?), retrying"; sleep 5
+done

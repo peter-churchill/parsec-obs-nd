@@ -15,6 +15,7 @@ driver, and nd_ratio_drivers_<site>.png (ratio against each driver, bin medians 
 
 python nd_ratio_drivers.py --sites ena
 python nd_ratio_drivers.py --sites ena sgp lasic epcape_pier --weighting pdf
+python nd_ratio_drivers.py --sites ena --query "depth < 800 and abs(cbh_minus_lcl) <= 300" --tag _shallow_coupled
 """
 import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
@@ -46,6 +47,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sites", nargs="+", default=["ena"])
     ap.add_argument("--weighting", choices=["pdf", "flux"], default="flux")
+    ap.add_argument("--query", help="pandas query to subset hours first, e.g. "
+                                    "\"depth < 800 and abs(cbh_minus_lcl) <= 300\"")
+    ap.add_argument("--tag", default="", help="suffix for the output files")
     a = ap.parse_args()
     from scipy.stats import spearmanr
     import matplotlib
@@ -66,6 +70,10 @@ def main():
         if "liquid_depth_cat_m" in d or "depth_built_m" in d:
             d["depth"] = d.get("liquid_depth_cat_m", pd.Series(np.nan, index=d.index)).fillna(
                 d.get("depth_built_m", pd.Series(np.nan, index=d.index)))
+        if a.query:
+            n0 = len(d)
+            d = d.query(a.query)
+            print(f"\n{site}: query '{a.query}' keeps {len(d)} of {n0} hours")
         print(f"\n{site}: {len(d)} hours, all: " + "ratio {ratio:.2f} ({q25:.2f}-{q75:.2f}), r {r:.2f}".format(**stats(d)))
         drv = [k for k in DRIVERS if k in d and d[k].notna().sum() >= 20]
         fig, axs = plt.subplots(1, len(drv), figsize=(3.8 * len(drv), 3.6), squeeze=False)
@@ -94,9 +102,9 @@ def main():
         axs[0, 0].legend(fontsize=7)
         fig.suptitle(f"{site}: what the parcel/observed Nd ratio depends on")
         fig.tight_layout()
-        fig.savefig(os.path.join(OUT, f"nd_ratio_drivers_{site}.png"), dpi=150)
+        fig.savefig(os.path.join(OUT, f"nd_ratio_drivers_{site}{a.tag}.png"), dpi=150)
         plt.close(fig)
-    pd.DataFrame(rows).to_csv(os.path.join(OUT, "bins.csv"), index=False, float_format="%.3g")
+    pd.DataFrame(rows).to_csv(os.path.join(OUT, f"bins{a.tag}.csv"), index=False, float_format="%.3g")
     print(f"-> {os.path.relpath(OUT, HERE)}/bins.csv, nd_ratio_drivers_<site>.png")
 
 

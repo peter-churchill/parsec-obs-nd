@@ -32,6 +32,7 @@ python composition_search.py                                  # all sites with i
 python composition_search.py --sites hyytiala puijo pallas --no-arm
 python composition_search.py --arm-only --sites ena sgp
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import os
 import sys

@@ -18,6 +18,7 @@ bin, cut at --coarse-dmax).
 
 python build_coarse.py --sites ena lasic mace-head pallas granada
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import os

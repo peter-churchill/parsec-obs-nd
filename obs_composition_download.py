@@ -21,6 +21,7 @@ python obs_composition_download.py --dry-run
 python obs_composition_download.py --source ebas
 nohup python -u obs_composition_download.py > logs/obs_comp_download.log 2>&1 &
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import os
 import sys

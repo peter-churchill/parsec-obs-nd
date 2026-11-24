@@ -25,6 +25,7 @@ python cloudnet_quality.py flags                     # slow: reads the categoriz
 python cloudnet_quality.py screen                    # fast; options change the thresholds
 python cloudnet_quality.py screen --require-coupled --lwp-range 40 250
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import os

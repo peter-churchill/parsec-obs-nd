@@ -22,6 +22,7 @@ Examples
 python weight_updrafts.py --site ena --sigma-w 0.3
 python weight_updrafts.py --site ena --w-file updrafts/ena_w_cloudbase.nc --weighting flux
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import os

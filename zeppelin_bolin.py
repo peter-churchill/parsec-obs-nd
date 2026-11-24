@@ -26,6 +26,7 @@ Examples
 python zeppelin_bolin.py
 python zeppelin_bolin.py --no-thermo
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import os
 

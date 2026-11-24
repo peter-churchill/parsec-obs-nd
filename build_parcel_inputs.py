@@ -25,6 +25,7 @@ Examples
 python build_parcel_inputs.py --root /path/to/obs-ccn-nd-susceptibility --sites ena hyytiala puijo
 export OBS_REPO=/path/to/obs-ccn-nd-susceptibility; python build_parcel_inputs.py --all
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import os
 import sys

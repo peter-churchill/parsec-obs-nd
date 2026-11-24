@@ -46,6 +46,7 @@ python build_composition.py                        # all sites with an inputs fi
 python build_composition.py --sites sgp pallas --dry-run
 python build_ccn_kappa.py && python build_composition.py --ccn-tier   # with the CCN tier
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import os

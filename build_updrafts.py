@@ -2,6 +2,7 @@
 """Hourly updraft statistics just below cloud base from Doppler lidar, for weight_updrafts.py.
 
 For each hour of inputs/<site>_parcel_inputs.nc, vertical velocity is taken in a layer below cloud base,
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 from CBH - --top m down to CBH - --depth m (default 50-300 m below base), with CBH the hour's cloud base
 height from the inputs (above ground), else the lidar's own cloud base.
 

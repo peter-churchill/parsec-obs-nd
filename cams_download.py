@@ -30,6 +30,7 @@ python cams_download.py --mode monthly --dry-run
 nohup python -u cams_download.py --mode monthly > logs/cams_monthly.log 2>&1 &
 nohup python -u cams_download.py --mode daily   > logs/cams_daily.log 2>&1 &
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import os
 import sys

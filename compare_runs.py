@@ -8,6 +8,7 @@ and the median number added above the measured spectrum (N_tail_cm3, N_coarse_cm
 
 python compare_runs.py --test runs_tail_coarse --sites ena lasic mace-head pallas granada
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import os

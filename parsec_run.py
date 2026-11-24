@@ -34,6 +34,7 @@ python parsec_run.py --inputs inputs/ena_parcel_inputs.nc --chunk-hours 25 --pri
 python parsec_run.py --inputs inputs/ena_parcel_inputs.nc --parsec ~/PARSEC-UFO-stockholm \\
     --chunk-hours 25 --task 0 --outdir runs
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import math
 import os

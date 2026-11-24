@@ -17,6 +17,7 @@ Examples
 python era5_download.py --dry-run
 nohup python -u era5_download.py > logs/era5.log 2>&1 &
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import os

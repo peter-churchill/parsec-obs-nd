@@ -43,6 +43,7 @@ python susceptibility_parcel.py --split coupling --n-boot 200
 python susceptibility_parcel.py --split temperature --n-boot 200
 python susceptibility_parcel.py --by station --n-boot 200      # pool sites.STATIONS (e.g. SGP = NDROP + Cloudnet)
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import os

@@ -25,6 +25,7 @@ Examples
 python build_thermo.py
 python build_thermo.py --sites hyytiala norunda --dry-run
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import os

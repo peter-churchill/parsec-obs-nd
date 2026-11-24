@@ -24,6 +24,7 @@ Examples
 python compare_nd.py
 python compare_nd.py --sites ena sgp --skip-weighting
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import os

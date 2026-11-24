@@ -30,6 +30,7 @@ the median of the station's in-cloud hourly sigma_w and the 10/90 % values in th
 use as --sigma-w bounds in weight_updrafts.py / compare_nd.py. Run it after build_updrafts.py (which would
 otherwise overwrite these two files with the pooled fallback).
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import hashlib

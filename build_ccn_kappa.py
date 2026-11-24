@@ -26,6 +26,7 @@ Examples
 python build_ccn_kappa.py                 # all sites with an inputs file and CCN data
 python build_ccn_kappa.py --sites hyytiala sgp
 """
+import netCDF4  # noqa: F401  first, before numpy/stdlib extensions: else Python intermittently aborts (heap corruption) when netCDF4 loads later
 import argparse
 import glob
 import os

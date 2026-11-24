@@ -56,7 +56,10 @@ CLOUDNET_RADAR_SITES = {"norunda": "norunda", "mace-head": "mace-head", "palaise
                         "zeppelin": "ny-alesund", "pallas": "kenttarova",
                         # lidar sites too: radar fills the hours without lidar and gives a lidar/radar comparison
                         "hyytiala": "hyytiala", "granada": "granada", "melpitz": "melpitz",
-                        "bucharest": "bucharest", "cabauw": "cabauw", "kenttarova": "kenttarova"}
+                        "bucharest": "bucharest", "cabauw": "cabauw", "kenttarova": "kenttarova",
+                        # ARM ENA: Cloudnet runs at Graciosa as arm-graciosa; its categorize files are used for the
+                        # drizzle / layer flags (cloudnet_quality.py), not for updrafts (ENA has the ARM lidar)
+                        "ena": "arm-graciosa", "ena_cloudnet": "arm-graciosa"}
 
 
 def arm(a):

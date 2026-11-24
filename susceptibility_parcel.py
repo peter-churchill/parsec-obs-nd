@@ -58,6 +58,7 @@ sys.path.insert(0, HERE)
 from sites import SITES, STATIONS, station_of  # noqa: E402
 
 OUT = os.path.join(HERE, "results", "susceptibility_parcel")
+HOURS = None            # {site: DatetimeIndex} from --hours-file
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 
@@ -146,6 +147,8 @@ def gather(site, a, group=None):
     hours = nd["obs"].index
     keep = (thermo != "placeholder") & nd["obs"].gt(0) & nd["parcel_pdf"].gt(0) & nd["parcel_flux"].gt(0)
     keep &= hours.isin(ccn_df.index)
+    if HOURS is not None:
+        keep &= hours.isin(HOURS.get(site, pd.DatetimeIndex([])))
     if group is not None:
         from compare_nd import classes
         c = classes(site, hours)
@@ -487,12 +490,24 @@ def main():
                     help="also compute everything per coupling class (|cloud base - LCL| <= 300 m) or per cloud-base "
                          "temperature class, into results/susceptibility_parcel/<split>_<group>/")
     ap.add_argument("--min-hours", type=int, default=30, help="minimum matched hours per site (and group)")
+    ap.add_argument("--hours-file", help="CSV with columns site, hour: use only these hours (e.g. "
+                                          "results/cloudnet_quality/ideal_hours.csv); sites not in it are skipped")
+    ap.add_argument("--tag", help="write to results/susceptibility_parcel/<tag>/ (default: the hours file's name)")
     ap.add_argument("--plots-only", action="store_true",
                     help="redraw s_at_ddelta / ddelta_vs_dact / ddelta_vs_ntot from the existing summary.csv")
     ap.add_argument("--by", choices=["site", "station"], default="site",
                     help="station: pool the sites of each sites.STATIONS group (same aerosol, different Nd "
                          "method) into one profile; output in results/susceptibility_parcel/stations/")
     a = ap.parse_args()
+    global HOURS
+    if a.hours_file:
+        h = pd.read_csv(a.hours_file, parse_dates=["hour"])
+        HOURS = {k: pd.DatetimeIndex(g["hour"]) for k, g in h.groupby("site")}
+        OUT = os.path.join(OUT, a.tag or os.path.splitext(os.path.basename(a.hours_file))[0])
+        if not a.sites:
+            a.sites = sorted(HOURS)
+    elif a.tag:
+        OUT = os.path.join(OUT, a.tag)
     if a.plots_only:
         out = os.path.join(OUT, "stations") if a.by == "station" else OUT
         t = pd.read_csv(os.path.join(out, "summary.csv"))

@@ -13,6 +13,10 @@ PARSEC setup per run (everything else from the template namelists):
     kprecip = 0         no collision-coalescence; aqueous chemistry, SVOCs, compressed film off
     start               T0, P0 from the inputs file, RH = --rh0, then --cloud-depth m above cloud base
     concentrations      written in m-3 (PARSEC divides by air density in g m-3; checked below)
+    optional extension  --tail lognormal: fitted accumulation-mode continuation above the last measured bin;
+                        --coarse cams: CAMS coarse sea salt / dust (build_coarse.py), pure per bin; both on
+                        --ext-dlog bins, per-bin composition in custom-composition.dat. N_input then includes
+                        them; N_tail_cm3, N_coarse_cm3 and tail_flag are written per run.
 
 Every run is done in a node-local scratch directory ($TMPDIR, or /tmp), the
 needed numbers are parsed from logs/logs.txt and the run's NetCDF output is
@@ -86,6 +90,109 @@ def spectrum_to_bins(dNdlogDp, d_nm, subdivide=2):
     return r(0.5 * (lo + hi)), r(lo), r(hi), n_m3
 
 
+# ----------------------------------------------------------------------------- beyond the measured spectrum
+# PARSEC column densities (g cm-3), sites.SPECIES order; same values as build_composition.RHO
+RHO_SPECIES = np.array([1.841, 1.78, 1.77, 1.50, 2.00, 2.65, 2.165, 1.50])
+I_DUST, I_SEASALT = 5, 6
+# CAMS coarse bins as dry-diameter ranges (nm): sea salt radius at 80 % RH ~ 2 x dry radius, so radius
+# 0.5-5 um -> dry diameter 0.5-5 um; dust radii are dry
+COARSE_BINS = {"m_ss_coarse_a": (I_SEASALT, 500.0, 5000.0), "m_ss_coarse_b": (I_SEASALT, 5000.0, 20000.0),
+               "m_du_coarse_a": (I_DUST, 1100.0, 1800.0), "m_du_coarse_b": (I_DUST, 1800.0, 40000.0)}
+
+
+def _lognormal(x, n, mu, s):
+    """dN/dlogD of a lognormal mode in log10 D (x, mu) with geometric std s"""
+    ls = np.log10(s)
+    return n / (np.sqrt(2 * np.pi) * ls) * np.exp(-(x - mu) ** 2 / (2 * ls ** 2))
+
+
+def fit_tail(dNdlogDp, d_nm, dmin=100.0):
+    """Lognormal fitted to the measured bins >= dmin nm, scaled so it meets the mean of the last three measured
+    bins (no jump at the edge). Returns (params, scale, flag); params None when the fit is not usable."""
+    from scipy.optimize import curve_fit
+    y = np.asarray(dNdlogDp, float)
+    d = np.asarray(d_nm, float)
+    ok = np.isfinite(y)
+    i1 = len(ok) - 1 - np.argmax(ok[::-1])
+    m = ok & (d >= dmin) & (y > 0)
+    if m.sum() < 5:
+        return None, 1.0, "few_bins"
+    x = np.log10(d)
+    try:
+        p, _ = curve_fit(_lognormal, x[m], y[m], p0=[np.nanmax(y[m]) * 0.4, np.log10(150), 1.6],
+                         bounds=([0, np.log10(50), 1.2], [1e6, np.log10(800), 2.5]), maxfev=4000)
+    except Exception:                                                               # noqa: BLE001
+        return None, 1.0, "fit_failed"
+    last = ok & (np.arange(len(y)) > i1 - 3) & (y > 0)
+    f = _lognormal(x[last], *p)
+    scale = float(np.exp(np.mean(np.log(np.clip(y[last], 1e-12, None))) - np.mean(np.log(np.clip(f, 1e-12, None)))))
+    if not (1 / 3 <= scale <= 3):
+        return None, 1.0, "edge_mismatch"
+    return p, scale, "ok"
+
+
+def extend_bins(bins, massfrac, dNdlogDp, d_nm, tail, coarse, dmax_tail, dmax_coarse, dlog):
+    """Append bins above the measured spectrum on one log grid (step dlog) from its upper edge:
+    tail    lognormal continuation of the measured accumulation mode to dmax_tail nm (fit_tail),
+            composition = the hour's bulk mass fractions
+    coarse  dict of CAMS coarse masses (ug m-3, COARSE_BINS keys): within each CAMS bin dV/dlogD is flat;
+            only the part above the measured edge and below dmax_coarse is used; pure sea salt / dust
+    Bins with both get the mass-weighted composition. Returns (bins, per-bin mass fractions, info)."""
+    r_mid, r_lo, r_hi, n = bins
+    mf = np.asarray(massfrac, float) / np.sum(massfrac)
+    comp = np.tile(mf, (len(n), 1))
+    info = dict(N_tail_cm3=0.0, N_coarse_cm3=0.0, tail_flag="off")
+    top = np.log10(2e9 * r_hi[-1])                      # measured upper edge, log10 nm
+    end = np.log10(max(dmax_tail if tail else 0, dmax_coarse if coarse else 0))
+    if end <= top + dlog / 2:
+        if tail:
+            info["tail_flag"] = "spectrum_reaches_max"
+        return bins, comp, info
+    e = np.arange(top, end + 1e-9, dlog)
+    if e[-1] < end - 1e-6:
+        e = np.append(e, end)
+    lo, hi = e[:-1], e[1:]
+    mid = 0.5 * (lo + hi)
+    dm = 10 ** mid * 1e-9                                # m
+    vol1 = np.pi / 6 * dm ** 3                           # m3 per particle
+    num = np.zeros(len(mid))                             # m-3
+    mass = np.zeros((len(mid), len(mf)))                 # g m-3 per species
+    if tail:
+        p, scale, flag = fit_tail(dNdlogDp, d_nm)
+        info["tail_flag"] = flag
+        if p is not None:
+            use = hi <= np.log10(dmax_tail) + 1e-9
+            nt = np.where(use, scale * _lognormal(mid, *p) * (hi - lo) * 1e6, 0.0)
+            num += nt
+            rho_b = 1.0 / np.sum(mf / RHO_SPECIES) * 1e6               # g m-3 of particle
+            mass += (nt * vol1 * rho_b)[:, None] * mf[None, :]
+            info["N_tail_cm3"] = float(nt.sum() * 1e-6)
+    if coarse:
+        for k, (isp, d0, d1) in COARSE_BINS.items():
+            mtot = float(coarse.get(k, np.nan))
+            if not (np.isfinite(mtot) and mtot > 0):
+                continue
+            l0, l1 = np.log10(d0), np.log10(d1)
+            ov = np.clip(np.minimum(hi, l1) - np.maximum(lo, l0), 0, None)   # overlap of each new bin with the CAMS bin
+            ov[hi > np.log10(dmax_coarse) + 1e-9] = 0
+            if ov.sum() == 0:
+                continue
+            mb = mtot * 1e-6 * ov / (l1 - l0)                                # g m-3 per new bin (flat dV/dlogD)
+            nb = mb / (RHO_SPECIES[isp] * 1e6 * vol1)
+            num += nb
+            mass[:, isp] += mb
+            info["N_coarse_cm3"] += float(nb.sum() * 1e-6)
+    keep = num > 0
+    if not keep.any():
+        return bins, comp, info
+    tot = mass[keep].sum(axis=1, keepdims=True)
+    new_comp = np.where(tot > 0, mass[keep] / np.where(tot > 0, tot, 1), mf[None, :])
+    rr = lambda lg: 0.5 * 10.0 ** lg * 1e-9               # noqa: E731
+    out = (np.concatenate([r_mid, rr(mid[keep])]), np.concatenate([r_lo, rr(lo[keep])]),
+           np.concatenate([r_hi, rr(hi[keep])]), np.concatenate([n, num[keep]]))
+    return out, np.vstack([comp, new_comp]), info
+
+
 # ----------------------------------------------------------------------------- namelists and .dat files
 def _set(text, key, value):
     """Replace `key = <value>,` at the start of a namelist line (keeps the comment)."""
@@ -120,8 +227,9 @@ def write_inputs(wd, tmpl, bins, massfrac, T0, P0, w, rh0, depth, dt, dtsub):
     np.savetxt(os.path.join(inp, "custom-midpoint_radii.dat"), r_mid, fmt="%.8e")
     np.savetxt(os.path.join(inp, "custom-size_limits.dat"), np.column_stack([r_lo, r_hi]), fmt="%.8e")
     np.savetxt(os.path.join(inp, "custom-concentration.dat"), n, fmt="%.8e")
-    mf = np.asarray(massfrac, float) / np.sum(massfrac)
-    np.savetxt(os.path.join(inp, "custom-composition.dat"), np.tile(mf, (len(n), 1)), fmt="%.10f", delimiter="\t")
+    mf = np.asarray(massfrac, float)
+    mf = np.tile(mf / mf.sum(), (len(n), 1)) if mf.ndim == 1 else mf / mf.sum(axis=1, keepdims=True)
+    np.savetxt(os.path.join(inp, "custom-composition.dat"), mf, fmt="%.10f", delimiter="\t")
     return tlim
 
 
@@ -200,6 +308,16 @@ def main():
     ap.add_argument("--rh0", type=float, default=98.0, help="start relative humidity (%%)")
     ap.add_argument("--cloud-depth", type=float, default=150.0, help="m above cloud base where the run ends")
     ap.add_argument("--subdivide", type=int, default=2, help="sub-bins per measured grid bin")
+    ap.add_argument("--tail", choices=["none", "lognormal"], default="none",
+                    help="continue the measured spectrum above its last bin with a fitted lognormal")
+    ap.add_argument("--tail-dmax", type=float, default=3000.0, help="nm; upper end of the tail")
+    ap.add_argument("--coarse", choices=["none", "cams"], default="none",
+                    help="add CAMS coarse sea salt and dust above the measured spectrum (inputs/<site>_coarse.nc "
+                         "from build_coarse.py)")
+    ap.add_argument("--coarse-dmax", type=float, default=10000.0, help="nm; largest coarse particles used")
+    ap.add_argument("--ext-dlog", type=float, default=0.05, help="log10 width of the added bins")
+    ap.add_argument("--subsample", type=int, default=1,
+                    help="run every n-th cloud hour only (sensitivity tests); chunks are made after subsampling")
     ap.add_argument("--dt", type=float, default=1.0)
     ap.add_argument("--dtsub", type=float, default=0.1)
     ap.add_argument("--unit-tol", type=float, default=0.05)
@@ -207,7 +325,8 @@ def main():
     a = ap.parse_args()
 
     ds = xr.open_dataset(a.inputs)
-    nh = ds.sizes["hour"]
+    sel = np.arange(0, ds.sizes["hour"], max(1, a.subsample))
+    nh = len(sel)
     ntask = math.ceil(nh / a.chunk_hours)
     if a.print_ntasks:
         print(ntask)
@@ -221,6 +340,12 @@ def main():
     tmpl = os.path.abspath(a.templates or os.path.join(a.parsec, "inputs"))
 
     site = ds.attrs["site"]
+    coarse_ds = None
+    if a.coarse == "cams":
+        cp = os.path.join(os.path.dirname(os.path.abspath(a.inputs)), f"{site}_coarse.nc")
+        if not os.path.exists(cp):
+            sys.exit(f"--coarse cams: {cp} missing (run build_coarse.py --sites {site})")
+        coarse_ds = xr.open_dataset(cp).load()
     h0, h1 = a.task * a.chunk_hours, min(nh, (a.task + 1) * a.chunk_hours)
     if a.max_hours:
         h1 = min(h1, h0 + a.max_hours)
@@ -233,14 +358,24 @@ def main():
 
     rows = []
     try:
-        for ih in range(h0, h1):
+        for ih in sel[h0:h1]:
             hour = pd.Timestamp(ds["hour"].values[ih])
-            bins = spectrum_to_bins(ds["dNdlogDp"].values[ih], d_nm, a.subdivide)
+            spec = ds["dNdlogDp"].values[ih]
+            bins = spectrum_to_bins(spec, d_nm, a.subdivide)
+            mfrac = ds["massfrac"].values[ih]
+            ext = dict(N_tail_cm3=0.0, N_coarse_cm3=0.0, tail_flag="off")
+            if a.tail != "none" or coarse_ds is not None:
+                cm = None
+                if coarse_ds is not None:
+                    c = coarse_ds.sel(hour=ds["hour"].values[ih])
+                    cm = {k: float(c[k]) for k in COARSE_BINS if k in c}
+                bins, mfrac, ext = extend_bins(bins, mfrac, spec, d_nm, a.tail != "none", cm,
+                                               a.tail_dmax, a.coarse_dmax, a.ext_dlog)
             n_in_cm3 = bins[3].sum() * 1e-6
             T0, P0 = float(ds["T0"].values[ih]), float(ds["P0"].values[ih])
             rho0 = P0 / (RD * T0) * 1e3                                   # g m-3 (dry; ~0.5% low)
             for w in a.w_grid:
-                tlim = write_inputs(wd, tmpl, bins, ds["massfrac"].values[ih], T0, P0, w,
+                tlim = write_inputs(wd, tmpl, bins, mfrac, T0, P0, w,
                                     a.rh0, a.cloud_depth, a.dt, a.dtsub)
                 rc, err, wall = run_one(exe, wd, timeout=max(600, 20 * tlim))
                 r = parse_log(os.path.join(wd, "logs", "logs.txt"))
@@ -252,7 +387,7 @@ def main():
                     if abs(n_back / n_in_cm3 - 1) > a.unit_tol:
                         status = f"unit_mismatch ({n_back:.1f} vs {n_in_cm3:.1f})"
                 rows.append(dict(site=site, hour_index=ih, hour=hour, w=w, status=status,
-                                 N_input_cm3=n_in_cm3, nbins=len(bins[3]), T0=T0, P0=P0,
+                                 N_input_cm3=n_in_cm3, nbins=len(bins[3]), T0=T0, P0=P0, **ext,
                                  comp_source=str(ds["comp_source"].values[ih]),
                                  thermo_source=str(ds["thermo_source"].values[ih]),
                                  wall_s=round(wall, 2), err=err.replace("\n", " ") if status != "ok" else "",

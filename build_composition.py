@@ -353,7 +353,8 @@ def read_ebas_bc(site, hours):
 
 # ----------------------------------------------------------------------------- CAMS
 CAMS_MAP = {"so4": ["aermr11"], "om": ["aermr07", "aermr08"], "bc": ["aermr09", "aermr10"],
-            "ss1": ["aermr01"], "ss2": ["aermr02"], "ss3": ["aermr03"], "du1": ["aermr04"]}
+            "ss1": ["aermr01"], "ss2": ["aermr02"], "ss3": ["aermr03"], "du1": ["aermr04"],
+            "du2": ["aermr05"], "du3": ["aermr06"]}
 
 
 def _cams_point(path, lat, lon, alt):

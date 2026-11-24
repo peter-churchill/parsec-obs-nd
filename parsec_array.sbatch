@@ -5,6 +5,9 @@
 #   N=$(python parsec_run.py --inputs inputs/<site>_parcel_inputs.nc --chunk-hours 50 --print-ntasks)
 #   sbatch --array=0-$((N-1)) parsec_array.sbatch <site>
 #
+# Sensitivity runs go to another directory with extra parsec_run.py options, e.g.
+#   OUTDIR=runs_tail_coarse EXTRA="--tail lognormal --coarse cams --subsample 15" sbatch --array=... parsec_array.sbatch pallas
+#
 # Test first with one task and check it with `seff <jobid>`:
 #   sbatch --array=0 parsec_array.sbatch ena
 #
@@ -42,4 +45,4 @@ python -u parsec_run.py \
     --parsec "$PARSEC_DIR" \
     --chunk-hours "$CHUNK" \
     --task "$SLURM_ARRAY_TASK_ID" \
-    --outdir runs
+    --outdir "${OUTDIR:-runs}" ${EXTRA:-}

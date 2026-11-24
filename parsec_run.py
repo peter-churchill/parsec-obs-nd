@@ -203,7 +203,10 @@ def _set(text, key, value):
     return pat.sub(lambda m: m.group(1) + str(value), text, count=1)
 
 
-def write_inputs(wd, tmpl, bins, massfrac, T0, P0, w, rh0, depth, dt, dtsub):
+def write_inputs(wd, tmpl, bins, massfrac, T0, P0, w, rh0, depth, dt, dtsub, entrain=None):
+    """entrain: None (adiabatic, the default) or dict(emur, radius, lapse): pseudo-adiabatic ascent mixing in
+    environmental air at rate emur / radius per metre (Lee & Pruppacher 1977); environment temperature T0 - lapse*z
+    (K km-1) written per run, environment humidity PARSEC's built-in profile (~95 % RH near the start)."""
     inp = os.path.join(wd, "inputs")
     os.makedirs(inp, exist_ok=True)
     for f in ("namelist_developer.in", "environmental_temperature_profile_user.dat",
@@ -211,8 +214,12 @@ def write_inputs(wd, tmpl, bins, massfrac, T0, P0, w, rh0, depth, dt, dtsub):
         shutil.copy(os.path.join(tmpl, f), os.path.join(inp, f))
 
     sw = open(os.path.join(tmpl, "namelist_switches.in")).read()
-    for k, v in SWITCHES.items():
+    for k, v in dict(SWITCHES, **({"iupadiabat": "F"} if entrain else {})).items():
         sw = _set(sw, k, v)
+    if entrain:
+        z = np.arange(0.0, depth + 1000.0, 10.0)
+        np.savetxt(os.path.join(inp, "environmental_temperature_profile_user.dat"),
+                   np.column_stack([z, T0 - entrain["lapse"] * 1e-3 * z]), fmt="%.1f %.3f")
     open(os.path.join(inp, "namelist_switches.in"), "w").write(sw)
 
     r_mid, r_lo, r_hi, n = bins
@@ -220,9 +227,12 @@ def write_inputs(wd, tmpl, bins, massfrac, T0, P0, w, rh0, depth, dt, dtsub):
     uv = open(os.path.join(tmpl, "namelist_UserVars.in")).read()
     for k, v in dict(dt=dt, dtsub=dtsub, time_limit=f"{tlim:.0f}", na=len(n), nat=1,
                      initial_temperature=f"{T0:.3f}", initial_pressure=f"{P0:.1f}", updraft=f"{w:g}",
-                     downdraft=0, initial_relhum=f"{rh0:g}", entrainment_param=0,
+                     downdraft=0, initial_relhum=f"{rh0:g}",
+                     entrainment_param=f"{entrain['emur']:g}" if entrain else 0,
                      cloud_depth=f"{depth:g}", initial_height=0).items():
         uv = _set(uv, k, v)
+    if entrain:
+        uv = _set(uv, "initial_radius", f"{entrain['radius']:g}")
     open(os.path.join(inp, "namelist_UserVars.in"), "w").write(uv)
 
     np.savetxt(os.path.join(inp, "custom-midpoint_radii.dat"), r_mid, fmt="%.8e")
@@ -317,6 +327,11 @@ def main():
                          "from build_coarse.py)")
     ap.add_argument("--coarse-dmax", type=float, default=10000.0, help="nm; largest coarse particles used")
     ap.add_argument("--ext-dlog", type=float, default=0.05, help="log10 width of the added bins")
+    ap.add_argument("--entrainment", type=float, default=None,
+                    help="PARSEC emur (0-0.6): pseudo-adiabatic ascent with entrainment of environmental air at "
+                         "emur / --parcel-radius per metre (default: adiabatic, no entrainment)")
+    ap.add_argument("--parcel-radius", type=float, default=350.0, help="m, with --entrainment")
+    ap.add_argument("--env-lapse", type=float, default=6.5, help="K km-1 environmental lapse rate, with --entrainment")
     ap.add_argument("--subsample", type=int, default=1,
                     help="run every n-th cloud hour only (sensitivity tests); chunks are made after subsampling")
     ap.add_argument("--dt", type=float, default=1.0)
@@ -376,8 +391,10 @@ def main():
             T0, P0 = float(ds["T0"].values[ih]), float(ds["P0"].values[ih])
             rho0 = P0 / (RD * T0) * 1e3                                   # g m-3 (dry; ~0.5% low)
             for w in a.w_grid:
+                ent = None if a.entrainment is None else dict(emur=a.entrainment, radius=a.parcel_radius,
+                                                              lapse=a.env_lapse)
                 tlim = write_inputs(wd, tmpl, bins, mfrac, T0, P0, w,
-                                    a.rh0, a.cloud_depth, a.dt, a.dtsub)
+                                    a.rh0, a.cloud_depth, a.dt, a.dtsub, entrain=ent)
                 rc, err, wall = run_one(exe, wd, timeout=max(600, 20 * tlim))
                 r = parse_log(os.path.join(wd, "logs", "logs.txt"))
                 status = "ok"

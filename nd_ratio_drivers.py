@@ -76,6 +76,9 @@ def main():
             print(f"\n{site}: query '{a.query}' keeps {len(d)} of {n0} hours")
         print(f"\n{site}: {len(d)} hours, all: " + "ratio {ratio:.2f} ({q25:.2f}-{q75:.2f}), r {r:.2f}".format(**stats(d)))
         drv = [k for k in DRIVERS if k in d and d[k].notna().sum() >= 20]
+        if not drv:
+            print("  (fewer than 20 hours with any driver: no bins or figure)")
+            continue
         fig, axs = plt.subplots(1, len(drv), figsize=(3.8 * len(drv), 3.6), squeeze=False)
         for ax, k in zip(axs[0], drv):
             lab, edges = DRIVERS[k]

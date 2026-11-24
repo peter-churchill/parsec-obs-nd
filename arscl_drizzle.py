@@ -27,11 +27,14 @@ import glob
 import os
 import sys
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import xarray as xr
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+warnings.filterwarnings("ignore", message="All-NaN slice")
 sys.path.insert(0, HERE)
 OUT = os.path.join(HERE, "data", "arscl")
 FLAGS = os.path.join(HERE, "results", "cloudnet_quality")

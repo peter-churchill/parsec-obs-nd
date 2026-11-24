@@ -15,8 +15,8 @@
 #SBATCH -p cpu
 #SBATCH -n 1
 #SBATCH -c 1
-#SBATCH --mem=2G
-#SBATCH -t 01:00:00
+#SBATCH --mem=1G
+#SBATCH -t 00:40:00
 #SBATCH -J parsec
 #SBATCH -o logs/parsec_%x_%A_%a.out
 

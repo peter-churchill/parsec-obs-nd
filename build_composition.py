@@ -473,10 +473,11 @@ def apply_ccn_kappa(mass, kc):
     return m, ok, clipped & ok
 
 
-def build_site(site, dry_run=False, ccn_tier=False, ccn_ss=0.3):
+def build_site(site, dry_run=False, ccn_tier=False, ccn_ss=0.3, cams_only=False, suffix=""):
     path = os.path.join(HERE, "inputs", f"{site}_parcel_inputs.nc")
     if not os.path.exists(path):
         return None
+    out_path = os.path.join(HERE, "inputs", f"{site}_parcel_inputs{suffix}.nc")
     with xr.open_dataset(path) as ds:
         ds = ds.load()
     hours = hour_index(ds["hour"].values)
@@ -501,6 +502,10 @@ def build_site(site, dry_run=False, ccn_tier=False, ccn_ss=0.3):
     use_a = (A["so4"].notna() & A["org"].notna()).values
     use_f = ~use_a & F["so4"].notna().values
     have_bc = B.notna().values
+    if cams_only:                       # uniform composition: CAMS for every site and hour, measurements ignored
+        use_a[:] = False
+        use_f[:] = False
+        have_bc[:] = False
     have_c = cams.notna().all(axis=1).values
 
     so4 = np.where(use_a, A["so4"].clip(lower=0), np.where(use_f, F["so4"].clip(lower=0), cams["so4"]))
@@ -564,10 +569,10 @@ def build_site(site, dry_run=False, ccn_tier=False, ccn_ss=0.3):
         ds[k] = ("hour", mass[:, j], {"units": "ug m-3", "long_name": f"dry mass, {SPECIES[j]} column"})
     ds["kappa_bulk"] = ("hour", kappa, {"units": "1", "long_name": "volume-weighted bulk kappa (diagnostic)"})
     ds.attrs["composition"] = "build_composition.py: " + ", ".join(f"{k} {v}" for k, v in summ.items())
-    tmp = path + ".tmp"
+    tmp = out_path + ".tmp"
     ds.to_netcdf(tmp)
-    os.replace(tmp, path)
-    print(f"   -> {os.path.relpath(path, HERE)}")
+    os.replace(tmp, out_path)
+    print(f"   -> {os.path.relpath(out_path, HERE)}")
     return s
 
 
@@ -578,13 +583,18 @@ def main():
     ap.add_argument("--ccn-tier", action="store_true",
                     help="hours that would get only BC + CAMS or CAMS composition: split (nh4)2so4 vs organics "
                          "to match kappa_ccn from results/<site>_ccn_kappa.nc (build_ccn_kappa.py)")
+    ap.add_argument("--cams-only", action="store_true",
+                    help="uniform composition: CAMS for every site and hour (no ACSM, filter or eBC)")
+    ap.add_argument("--suffix", default="",
+                    help="write inputs/<site>_parcel_inputs<suffix>.nc instead of overwriting the inputs file, "
+                         "e.g. --cams-only --suffix _cams (run parsec_run.py --inputs on it with another OUTDIR)")
     ap.add_argument("--ccn-ss", type=float, default=0.3, help="target setpoint for --ccn-tier, %% (default 0.3)")
     a = ap.parse_args()
     sites = a.sites or sorted(os.path.basename(p).replace("_parcel_inputs.nc", "")
                               for p in glob.glob(os.path.join(HERE, "inputs", "*_parcel_inputs.nc")))
     rows = []
     for s in sites:
-        r = build_site(s, a.dry_run, a.ccn_tier, a.ccn_ss)
+        r = build_site(s, a.dry_run, a.ccn_tier, a.ccn_ss, a.cams_only, a.suffix)
         if r is not None:
             for t, n in r.str.split("+").str[0].value_counts().items():
                 rows.append(dict(site=s, tier=t, hours=n))

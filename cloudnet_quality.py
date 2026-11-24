@@ -198,7 +198,8 @@ def screen(a):
     pd.concat(ideal).to_csv(os.path.join(OUT, "ideal_hours.csv"), index=False)
     pd.set_option("display.width", 200)
     w = s.pivot_table(index="site", columns="step", values=["n", "r_log"], sort=False)
-    order = list(dict.fromkeys(s["step"]))
+    canon = ["all", "single layer", "no drizzle", "no ice", "no rain", "LWP range", "homogeneous", "coupled"]
+    order = [k for k in canon if k in set(s["step"])]          # the order the steps are applied in
     print("hours after each cumulative step:")
     print(w["n"][order].to_string(float_format="{:.0f}".format))
     print("\nr(log Nd) parcel vs observed after each step:")

@@ -216,10 +216,15 @@ def write_inputs(wd, tmpl, bins, massfrac, T0, P0, w, rh0, depth, dt, dtsub, ent
     sw = open(os.path.join(tmpl, "namelist_switches.in")).read()
     for k, v in dict(SWITCHES, **({"iupadiabat": "F"} if entrain else {})).items():
         sw = _set(sw, k, v)
+    z0 = 0.0
     if entrain:
-        z = np.arange(0.0, depth + 1000.0, 10.0)
+        # The pseudo-adiabatic mode ignores initial_pressure and sets p = p0 exp(-g M z / (R T)) at the start height
+        # (mo_parsec_dyn.f90, p0 = 101325 Pa): start at the height where that gives our P0, and write the
+        # environment on absolute heights with T = T0 at the start.
+        z0 = max(0.0, 1000.0 * 8.3144 * T0 / (9.80665 * 28.9644) * np.log(101325.0 / P0))
+        z = np.arange(0.0, z0 + depth + 1000.0, 10.0)
         np.savetxt(os.path.join(inp, "environmental_temperature_profile_user.dat"),
-                   np.column_stack([z, T0 - entrain["lapse"] * 1e-3 * z]), fmt="%.1f %.3f")
+                   np.column_stack([z, T0 - entrain["lapse"] * 1e-3 * (z - z0)]), fmt="%.1f %.3f")
     open(os.path.join(inp, "namelist_switches.in"), "w").write(sw)
 
     r_mid, r_lo, r_hi, n = bins
@@ -229,7 +234,7 @@ def write_inputs(wd, tmpl, bins, massfrac, T0, P0, w, rh0, depth, dt, dtsub, ent
                      initial_temperature=f"{T0:.3f}", initial_pressure=f"{P0:.1f}", updraft=f"{w:g}",
                      downdraft=0, initial_relhum=f"{rh0:g}",
                      entrainment_param=f"{entrain['emur']:g}" if entrain else 0,
-                     cloud_depth=f"{depth:g}", initial_height=0).items():
+                     cloud_depth=f"{depth:g}", initial_height=f"{z0:.1f}").items():
         uv = _set(uv, k, v)
     if entrain:
         uv = _set(uv, "initial_radius", f"{entrain['radius']:g}")

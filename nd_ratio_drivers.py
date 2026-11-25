@@ -31,16 +31,19 @@ DRIVERS = {  # column: (label, bin edges or None for quartiles)
     "lwp_gm2": ("LWP (g m$^{-2}$)", None),
     "depth": ("liquid depth (m)", None),
     "cbh_minus_lcl": ("cloud base - LCL (m)", [-5000, -300, 300, 1000, 10000]),
+    "visibility_m": ("station visibility (m)", [0, 100, 200, 500, 1e6]),
+    "rain_mmh": ("station rain (mm h$^{-1}$)", [-0.001, 0.0, 0.1, 1.0, 1e3]),
     "Nd_obs": ("observed Nd (cm$^{-3}$)", None),
 }
 
 
 def stats(g):
     if len(g) == 0:
-        return dict(n=0, ratio=np.nan, q25=np.nan, q75=np.nan, r=np.nan)
+        return dict(n=0, ratio=np.nan, q25=np.nan, q75=np.nan, r=np.nan, slope=np.nan)
     lr = np.log10(g["Nd_parcel"] / g["Nd_obs"])
     r = np.corrcoef(np.log10(g["Nd_obs"]), np.log10(g["Nd_parcel"]))[0, 1] if len(g) > 2 else np.nan
-    return dict(n=len(g), ratio=10 ** lr.median(), q25=10 ** lr.quantile(.25), q75=10 ** lr.quantile(.75), r=r)
+    sl = np.polyfit(np.log10(g["Nd_obs"]), np.log10(g["Nd_parcel"]), 1)[0] if len(g) > 2 else np.nan
+    return dict(n=len(g), ratio=10 ** lr.median(), q25=10 ** lr.quantile(.25), q75=10 ** lr.quantile(.75), r=r, slope=sl)
 
 
 def main():
@@ -74,7 +77,7 @@ def main():
             n0 = len(d)
             d = d.query(a.query)
             print(f"\n{site}: query '{a.query}' keeps {len(d)} of {n0} hours")
-        print(f"\n{site}: {len(d)} hours, all: " + "ratio {ratio:.2f} ({q25:.2f}-{q75:.2f}), r {r:.2f}".format(**stats(d)))
+        print(f"\n{site}: {len(d)} hours, all: " + "ratio {ratio:.2f} ({q25:.2f}-{q75:.2f}), r {r:.2f}, slope {slope:.2f}".format(**stats(d)))
         drv = [k for k in DRIVERS if k in d and d[k].notna().sum() >= 20]
         if not drv:
             print("  (fewer than 20 hours with any driver: no bins or figure)")

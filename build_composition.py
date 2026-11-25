@@ -499,9 +499,9 @@ def build_site(site, dry_run=False, ccn_tier=False, ccn_ss=0.3, cams_only=False,
     F = filt if filt is not None else pd.DataFrame({k: nan for k in ("so4", "nh4", "na")})
     B = bc["bc"] if bc is not None else nan
 
-    use_a = (A["so4"].notna() & A["org"].notna()).values
-    use_f = ~use_a & F["so4"].notna().values
-    have_bc = B.notna().values
+    use_a = (A["so4"].notna() & A["org"].notna()).to_numpy(copy=True)     # copies: pandas may hand out read-only views
+    use_f = ~use_a & F["so4"].notna().to_numpy(copy=True)
+    have_bc = B.notna().to_numpy(copy=True)
     if cams_only:                       # uniform composition: CAMS for every site and hour, measurements ignored
         use_a[:] = False
         use_f[:] = False

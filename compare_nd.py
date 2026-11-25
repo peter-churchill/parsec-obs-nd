@@ -310,7 +310,7 @@ def site_scatter(t, weighting="flux", colour_by="none", outdir=None):
         fig.tight_layout()
         fig.savefig(os.path.join(d, f"{site}_{weighting}.png"), dpi=150)
         plt.close(fig)
-    print(f"-> {os.path.relpath(path, HERE)}, results/nd_scatter/<site>_{weighting}.png")
+    print(f"-> {os.path.relpath(path, HERE)}, {os.path.relpath(d, HERE)}/<site>_{weighting}.png")
 
 
 def main():

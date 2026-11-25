@@ -144,7 +144,7 @@ def plot(pairs, out):
             if log:
                 lo, hi = v.min() / 1.5, v.max() * 1.5
                 ax.set(xscale="log", yscale="log")
-                subs = (1.0, 2.0, 5.0) if np.log10(hi / lo) < 3 else (1.0,)   # 1-2-5 ticks on short axes
+                subs = (1.0, 2.0, 5.0) if np.log10(hi / lo) < 1.7 else (1.0,)   # 1-2-5 ticks only on short axes
                 for a in (ax.xaxis, ax.yaxis):
                     a.set_major_locator(LogLocator(subs=subs, numticks=12))
                     a.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))

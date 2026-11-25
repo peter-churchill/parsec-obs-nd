@@ -40,6 +40,7 @@ RES = os.path.join(HERE, "results")
 BOUNDS = {"puijo": (0.23, 0.70), "pallas": (0.23, 0.70)}
 COUPLED_M = 300.0                                   # |cloud base - surface LCL| for "coupled", as in build_thermo.py
 TEMP_EDGES = (263.15, 273.15)                       # cold < -10 C <= supercooled < 0 C <= warm
+AF_OBS_MAX = 2.0                                    # screen: observed Nd / N100 above this is not physical
 
 
 def classes(site, hours):
@@ -117,6 +118,9 @@ def collect(files):
                                "thermo_source": d["thermo_source"].values.astype(str),
                                "w_source": d["w_source"].values.astype(str),
                                "frac_w_outside": d["frac_w_outside"].values})
+            for v, col in (("Ntot_input", "Ntot"), ("sigma_w", "sigma_w"), ("Dact_parcel_nm", "Dact_nm"),
+                           ("Smax_parcel", "Smax_pct")):
+                df[col] = d[v].values if v in d else np.nan          # older result files lack these
         c = classes(site, df["hour"])
         df["coupling"], df["temp"] = c["coupling"].values, c["temp"].values
         df["T0"], df["cbh_minus_lcl"] = c["T0"].values, c["cbh_minus_lcl"].values
@@ -132,7 +136,20 @@ def collect(files):
     t["thermo"] = t["thermo_source"].str.replace(r"_(decoupled|cloud_base|station)$", r"_\1", regex=True)
     t["usable"] = (t["thermo_source"] != "placeholder") & np.isfinite(t["Nd_parcel"]) & (t["Nd_obs"] > 0)
     t["ratio"] = t["Nd_parcel"] / t["Nd_obs"]
+    t["af_obs"] = t["Nd_obs"] / t["N100"]
+    t["af_parcel"] = t["Nd_parcel"] / t["N100"]
+    # physical bounds on the observed Nd: no more droplets than particles, and not far more than N(>100 nm)
+    t["phys_ok"] = (t["af_obs"] <= AF_OBS_MAX) & ~(t["Nd_obs"] > t["Ntot"])
     return t
+
+
+def screen_table(t):
+    """Hours removed by the physical-bounds screen, per site (observed-updraft, flux)."""
+    u = t[t["usable"] & (t["variant"] == "obs") & (t["weighting"] == "flux")]
+    return u.groupby("site").apply(lambda g: pd.Series({
+        "hours": len(g), "af_obs_gt_max": int((g["af_obs"] > AF_OBS_MAX).sum()),
+        "Nd_obs_gt_Ntot": int((g["Nd_obs"] > g["Ntot"]).sum()),
+        "kept": int(g["phys_ok"].sum()), "kept_frac": g["phys_ok"].mean()}), include_groups=False).reset_index()
 
 
 def summarise(t, by):
@@ -184,7 +201,7 @@ def zeppelin_activation(a):
                   f"median ratio {np.median(q):.2f} (IQR {np.percentile(q, 25):.2f}-{np.percentile(q, 75):.2f})")
 
 
-def plot(t):
+def plot(t, outdir=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -205,7 +222,8 @@ def plot(t):
     axs[0].set_ylabel("parcel Nd (cm$^{-3}$)")
     axs[1].legend(fontsize=7, markerscale=3, ncol=2, loc="lower right")
     fig.tight_layout()
-    out = os.path.join(RES, "nd_parcel_vs_obs.png")
+    os.makedirs(outdir or RES, exist_ok=True)
+    out = os.path.join(outdir or RES, "nd_parcel_vs_obs.png")
     fig.savefig(out, dpi=150)
     print(f"-> {os.path.relpath(out, HERE)}")
 
@@ -226,6 +244,7 @@ def site_scatter(t, weighting="flux", colour_by="none", outdir=None):
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     outdir = outdir or RES
+    os.makedirs(outdir, exist_ok=True)
     u = t[t["usable"] & (t["variant"] == "obs") & (t["weighting"] == weighting)]
     u = u[(u["Nd_obs"] > 0) & (u["Nd_parcel"] > 0)]
     sites = sorted(u["site"].unique())
@@ -303,13 +322,18 @@ def main():
                     help="only redraw the per-site scatter plots from results/nd_comparison_hours.csv")
     ap.add_argument("--colour-by", choices=["none", "coupling", "temp"], default="none",
                     help="colour the per-site scatter points by coupling or cloud-base temperature class")
+    ap.add_argument("--screen", action="store_true",
+                    help=f"summaries and plots only from hours passing the physical-bounds screen "
+                         f"(Nd_obs/N100 <= {AF_OBS_MAX:g} and Nd_obs <= Ntot); the hourly CSV keeps all hours with phys_ok")
     a = ap.parse_args()
     if a.scatter_only:
         t = pd.read_csv(os.path.join(RES, "nd_comparison_hours.csv"))
         if a.sites:
             t = t[t["site"].isin(a.sites)]
+        if a.screen and "phys_ok" in t:
+            t = t[t["phys_ok"]]
         for wt in ("flux", "pdf"):
-            site_scatter(t, wt, a.colour_by)
+            site_scatter(t, wt, a.colour_by, outdir=os.path.join(RES, "screened") if a.screen else None)
         return
     os.makedirs(RES, exist_ok=True)
     sites = a.sites or sorted(d for d in os.listdir(a.rundir) if glob.glob(os.path.join(a.rundir, d, "chunk_*.csv")))
@@ -326,6 +350,14 @@ def main():
         raise SystemExit("no results to compare")
     t = collect(files)
     t.to_csv(os.path.join(RES, "nd_comparison_hours.csv"), index=False)
+    pd.set_option("display.width", 200)
+    print("\nPhysical-bounds screen (observed-updraft, flux; Ntot = parcel input total):")
+    print(screen_table(t).to_string(index=False, float_format="{:.2f}".format))
+    suffix = ""
+    if a.screen:
+        t = t[t["phys_ok"]].copy()
+        suffix = "_screened"
+        print("summaries below use only hours passing the screen")
     by_site = summarise(t, ["site", "variant", "weighting"])
     by_tier = summarise(t[t["variant"] == "obs"], ["weighting", "tier"])
     by_thermo = summarise(t[t["variant"] == "obs"], ["weighting", "thermo"])
@@ -337,14 +369,13 @@ def main():
     multi = ob.groupby("station")["site"].transform("nunique") > 1          # stations with more than one site
     by_station = summarise(ob, ["station", "weighting"])
     by_station_method = summarise(ob[multi & (ob["weighting"] == "flux")], ["station", "nd_method", "site"])
-    with open(os.path.join(RES, "nd_comparison_summary.csv"), "w") as fh:
+    with open(os.path.join(RES, f"nd_comparison_summary{suffix}.csv"), "w") as fh:
         for name, d in (("by_site", by_site), ("by_composition_tier", by_tier), ("by_thermo_source", by_thermo),
                         ("by_coupling", by_coup), ("by_temperature", by_temp),
                         ("by_site_and_coupling_flux", by_site_coup), ("by_site_and_temperature_flux", by_site_temp),
                         ("by_station", by_station), ("by_station_and_nd_method_flux", by_station_method)):
             fh.write(f"# {name}\n")
             d.to_csv(fh, index=False, float_format="%.3g")
-    pd.set_option("display.width", 200)
     fmt = {c: "{:.2f}".format for c in ("ratio_median", "ratio_q25", "ratio_q75", "r_log")}
     for name, d in (("By site", by_site), ("By composition tier", by_tier), ("By cloud-base T/P source", by_thermo),
                     ("By coupling (|cloud base - LCL| <= 300 m)", by_coup), ("By cloud-base temperature", by_temp),
@@ -355,10 +386,11 @@ def main():
         print(f"\n{name} (parcel / observed Nd):")
         print(d.to_string(index=False, formatters=fmt, float_format="{:.0f}".format))
     zeppelin_activation(a)
-    plot(t)
+    figdir = os.path.join(RES, "screened") if a.screen else RES
+    plot(t, figdir)
     for wt in ("flux", "pdf"):
-        site_scatter(t, wt, a.colour_by)
-    print("-> results/nd_comparison_hours.csv, results/nd_comparison_summary.csv")
+        site_scatter(t, wt, a.colour_by, outdir=figdir)
+    print(f"-> results/nd_comparison_hours.csv, results/nd_comparison_summary{suffix}.csv")
 
 
 if __name__ == "__main__":

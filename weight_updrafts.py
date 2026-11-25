@@ -17,6 +17,10 @@ for the chosen activation criterion, and computes one parcel Nd per hour:
 Hours without updraft information get NaN, with w_source = "none". The output keeps
 the full Nd(hour, w) table so other weightings can be tried without rerunning PARSEC.
 
+The same weights give the hour's Smax_parcel and Dact_parcel_nm (dry activation diameter,
+2 x the run's minimum activation radius). Ntot_input is the total number of the parcel's input
+size distribution and sigma_w the hour's updraft spread (from the w file, or the std of its samples).
+
 Examples
 --------
 python weight_updrafts.py --site ena --sigma-w 0.3
@@ -47,9 +51,15 @@ def load_runs(rundir, site, criterion):
     df.loc[bad, col] = np.nan
     nd = df.pivot(index="hour_index", columns="w", values=col).sort_index()
     smax = df.pivot(index="hour_index", columns="w", values="Smax_pct").reindex(nd.index)
+    if "r_act_min_nm" in df:
+        ract = df.pivot(index="hour_index", columns="w", values="r_act_min_nm").reindex(nd.index)
+        ract = ract.where(ract > 0)
+    else:
+        ract = smax * np.nan
+    ntot = df.groupby("hour_index")["N_input_cm3"].first().reindex(nd.index)
     hours = df.groupby("hour_index")["hour"].first().reindex(nd.index)
     print(f"{site}: {len(files)} chunks, {nd.shape[0]} hours x {nd.shape[1]} updrafts, {int(bad.sum())} runs not ok")
-    return nd, smax, hours
+    return nd, smax, ract, ntot, hours
 
 
 def nd_of_w(w, wgrid, ndrow):
@@ -104,21 +114,29 @@ def main():
     ap.add_argument("--out", help="default results/<site>_parcel_nd_<tag>.nc")
     a = ap.parse_args()
 
-    nd, smax, hours = load_runs(a.rundir, a.site, a.criterion)
+    nd, smax, ract, ntot, hours = load_runs(a.rundir, a.site, a.criterion)
     wgrid = nd.columns.to_numpy(float)
     inp = xr.open_dataset(a.inputs or os.path.join(HERE, "inputs", f"{a.site}_parcel_inputs.nc"))
     nh = len(nd)
-    out_nd = np.full(nh, np.nan)
+    out_nd, out_smax, out_ract, out_sig = (np.full(nh, np.nan) for _ in range(4))
     n_used = np.zeros(nh, int)
     clamped = np.full(nh, np.nan)
     wsrc = np.array(["none"] * nh, dtype=object)
 
+    def apply(i, w, p):
+        """Weighted Nd, Smax and activation radius of hour i over updrafts w with PDF weights p."""
+        f = p * (w if a.weighting == "flux" else 1.0)
+        for out, tab in ((out_nd, nd), (out_smax, smax), (out_ract, ract)):
+            v = nd_of_w(w, wgrid, tab.iloc[i].to_numpy(float))
+            ok = np.isfinite(v)
+            out[i] = np.sum(v[ok] * f[ok]) / np.sum(f[ok]) if ok.any() else np.nan
+
     if a.sigma_w is not None:
         wq, pq = gaussian_positive(a.sigma_w)
         for i in range(nh):
-            v = nd_of_w(wq, wgrid, nd.iloc[i].to_numpy())
-            out_nd[i] = np.sum(v * pq * (wq if a.weighting == "flux" else 1)) / np.sum(pq * (wq if a.weighting == "flux" else 1))
+            apply(i, wq, pq)
             clamped[i] = pq[(wq < wgrid[0]) | (wq > wgrid[-1])].sum()
+        out_sig[:] = a.sigma_w
         wsrc[:] = f"fixed_sigma_{a.sigma_w:g}"
         tag = f"sigma{a.sigma_w:g}_{a.weighting}"
     else:
@@ -129,26 +147,28 @@ def main():
             k = pos.get(pd.Timestamp(hours.iloc[i]))
             if k is None:
                 continue
-            row = nd.iloc[i].to_numpy()
             hs = str(wf["hour_source"].values[k]) if "hour_source" in wf else str(wf.attrs.get("w_source", ""))
-            w = wf["w"].values[k] if ("w" in wf and not a.sigma_only) else np.array([])
-            w = w[np.isfinite(w) & (w > 0)]
+            wall = wf["w"].values[k] if ("w" in wf and not a.sigma_only) else np.array([])
+            wall = wall[np.isfinite(wall)]
+            if "sigma_w" in wf and np.isfinite(wf["sigma_w"].values[k]):
+                out_sig[i] = float(wf["sigma_w"].values[k])
+            elif len(wall) > 2:
+                out_sig[i] = float(np.std(wall))
+            w = wall[wall > 0]
             if len(w) >= a.min_samples:                 # samples where the hour has enough, else the Gaussian
-                out_nd[i] = weighted(nd_of_w(w, wgrid, row), w, a.weighting)
+                apply(i, w, np.ones_like(w))
                 n_used[i] = len(w)
                 clamped[i] = np.mean((w < wgrid[0]) | (w > wgrid[-1]))
                 wsrc[i] = f"{hs}_samples"
             elif "sigma_w" in wf:
-                s = float(wf["sigma_w"].values[k])
+                sg = float(wf["sigma_w"].values[k])
                 m = float(wf["w_mean"].values[k]) if "w_mean" in wf else 0.0
-                if not np.isfinite(s) or s <= 0:
+                if not np.isfinite(sg) or sg <= 0:
                     continue
-                wq, pq = gaussian_positive(s, m)
+                wq, pq = gaussian_positive(sg, m)
                 if wq is None:
                     continue
-                v = nd_of_w(wq, wgrid, row)
-                f = wq if a.weighting == "flux" else 1
-                out_nd[i] = np.sum(v * pq * f) / np.sum(pq * f)
+                apply(i, wq, pq)
                 clamped[i] = pq[(wq < wgrid[0]) | (wq > wgrid[-1])].sum()
                 wsrc[i] = f"{hs}_sigma"
         tag = f"{os.path.splitext(os.path.basename(a.w_file))[0]}_{a.weighting}"
@@ -158,6 +178,10 @@ def main():
         {"Nd_parcel": ("hour", out_nd, {"units": "cm-3", "long_name": f"updraft-weighted parcel Nd ({a.weighting}), criterion {a.criterion}"}),
          "Nd_w": (("hour", "w"), nd.to_numpy(), {"units": "cm-3", "long_name": "parcel Nd on the updraft grid"}),
          "Smax_w": (("hour", "w"), smax.to_numpy(), {"units": "%"}),
+         "Smax_parcel": ("hour", out_smax, {"units": "%", "long_name": f"updraft-weighted ({a.weighting}) parcel Smax"}),
+         "Dact_parcel_nm": ("hour", 2 * out_ract, {"units": "nm", "long_name": f"updraft-weighted ({a.weighting}) dry activation diameter"}),
+         "Ntot_input": ("hour", ntot.to_numpy(float), {"units": "cm-3", "long_name": "total number of the parcel input size distribution"}),
+         "sigma_w": ("hour", out_sig, {"units": "m s-1"}),
          "n_w_samples": ("hour", n_used),
          "frac_w_outside": ("hour", clamped, {"long_name": "fraction of the w PDF outside the run grid (extrapolated below, held above)"}),
          "w_source": ("hour", wsrc),

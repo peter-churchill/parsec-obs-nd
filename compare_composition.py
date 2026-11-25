@@ -15,7 +15,8 @@ Quantities (ug m-3 unless noted), and the hours on which each is an independent 
   org_frac    organics / (inorganic + organics + BC), 1             acsm only
   bc          black carbon                                          hours with measured eBC
   seasalt     submicron dry sea salt                                filter only (from measured Na)
-  kappa       bulk kappa of the dry mass fractions, 1               acsm, filter
+  kappa       bulk kappa of the dry mass fractions, 1               acsm only (filter organics follow
+              CAMS OM/SO4, so the filter kappa agrees with CAMS largely by construction)
 
 Output: results/composition_obs_vs_cams.csv (per site, tier and quantity: hours, medians, median
 CAMS/obs ratio with quartiles, r of log values) and results/composition_obs_vs_cams.png.
@@ -44,7 +45,7 @@ QUANT = {  # name: (obs tiers where independent, needs measured BC)
     "org_frac": (("acsm",), False),
     "bc": (("acsm", "filter"), True),
     "seasalt": (("filter",), False),
-    "kappa": (("acsm", "filter"), False),
+    "kappa": (("acsm",), False),
 }
 
 
@@ -106,37 +107,61 @@ def stats(m, site):
 
 
 def plot(pairs, out):
+    """One row per site, one panel per quantity that is independent for that site's observed tier(s).
+    Colour: CAMS 3-hourly (dark) vs monthly mean (light), so the monthly bands are recognisable."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    qs = ["inorganic", "organics", "org_frac", "kappa"]
-    sites = list(pairs)
-    fig, axs = plt.subplots(len(sites), len(qs), figsize=(3.3 * len(qs), 3.1 * len(sites)), squeeze=False)
-    for i, s in enumerate(sites):
-        m = pairs[s]
-        for j, q in enumerate(qs):
+    from matplotlib.ticker import LogLocator, FuncFormatter, NullFormatter
+    qs = ["inorganic", "organics", "org_frac", "kappa", "bc"]
+    panels = {s: [q for q in qs if set(QUANT[q][0]) & set(m["tier_obs"].unique())] for s, m in pairs.items()}
+    ncol = max(len(v) for v in panels.values())
+    fig, axs = plt.subplots(len(pairs), ncol, figsize=(3.2 * ncol, 3.0 * len(pairs)), squeeze=False)
+    colours = {"cams3h": "#08519c", "camsmon": "#9ecae1"}
+    for i, (s, m) in enumerate(pairs.items()):
+        for j in range(ncol):
             ax = axs[i, j]
-            tiers = QUANT[q][0]
-            for tier, col in (("acsm", "#1f77b4"), ("filter", "#d62728")):
-                if tier not in tiers:
-                    continue
-                g = m[m["tier_obs"] == tier]
-                if len(g):
-                    ax.scatter(g[f"{q}_obs"], g[f"{q}_cams"], s=4, alpha=0.4, color=col, label=tier, rasterized=True)
-            v = pd.concat([m[f"{q}_obs"], m[f"{q}_cams"]])
-            v = v[np.isfinite(v) & (v > 0)]
-            if len(v) == 0:
+            if j >= len(panels[s]):
                 ax.set_visible(False)
                 continue
-            lim = [v.min() * 0.8, v.max() * 1.25]
-            ax.plot(lim, lim, "k-", lw=0.7)
-            if q not in ("kappa", "org_frac"):
+            q = panels[s][j]
+            tiers, need_bc = QUANT[q]
+            g = m[m["tier_obs"].isin(tiers)]
+            if need_bc:
+                g = g[g["bc_obs_obs"]]
+            x, y = g[f"{q}_obs"], g[f"{q}_cams"]
+            ok = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
+            for tag, col in colours.items():
+                k = ok & (g["cams_tag_cams"] == tag)
+                if k.any():
+                    ax.scatter(x[k], y[k], s=4, alpha=0.5, color=col, rasterized=True,
+                               label=f"CAMS {'3-hourly' if tag == 'cams3h' else 'monthly'} ({int(k.sum())})")
+            if not ok.any():
+                ax.set_visible(False)
+                continue
+            v = np.concatenate([x[ok], y[ok]])
+            log = q not in ("kappa", "org_frac")
+            if log:
+                lo, hi = v.min() / 1.5, v.max() * 1.5
                 ax.set(xscale="log", yscale="log")
+                subs = (1.0, 2.0, 5.0) if np.log10(hi / lo) < 3 else (1.0,)   # 1-2-5 ticks on short axes
+                for a in (ax.xaxis, ax.yaxis):
+                    a.set_major_locator(LogLocator(subs=subs, numticks=12))
+                    a.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+                    a.set_minor_formatter(NullFormatter())
+            else:
+                lo, hi = 0.0, max(1.0, v.max() * 1.05) if q == "org_frac" else v.max() * 1.1
+            lim = [lo, hi]
+            ax.plot(lim, lim, "k-", lw=0.7)
+            if log:
                 for f in (0.5, 2):
                     ax.plot(lim, [l * f for l in lim], "k:", lw=0.5)
-            ax.set(xlim=lim, ylim=lim, title=f"{s}: {q}", xlabel="observed", ylabel="CAMS")
-            if ax.get_legend_handles_labels()[0]:
-                ax.legend(fontsize=7, markerscale=3, loc="upper left")
+            unit = "" if q in ("kappa", "org_frac") else " (ug m$^{-3}$)"
+            ax.set(xlim=lim, ylim=lim, title=f"{s} ({'/'.join(sorted(g['tier_obs'].unique()))}): {q}",
+                   xlabel=f"observed{unit}", ylabel=f"CAMS{unit}")
+            ax.set_aspect("equal")
+            ax.title.set_fontsize(9)
+            ax.legend(fontsize=6, markerscale=3, loc="upper left")
     fig.tight_layout()
     fig.savefig(out, dpi=150)
     plt.close(fig)

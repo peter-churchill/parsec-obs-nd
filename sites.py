@@ -9,7 +9,9 @@ laptop and on Arrhenius.
 
 pnsd:  ("cache", <file in results/pnsd_cache>)    hourly dN/dlogDp already gridded
        ("csv",   <Virtanen et al. PNSD csv>)      gridded on the fly with pnsd_tools.hourly_pnsd_csv
-kind:  "ndrop" (ARM NDROP retrieval), "cloudnet" (scaled-Frisch N), "insitu"
+       ("built", <built file>)                     the built file's own dNdlogDp (aircraft), regridded to GRID_NM
+kind:  "ndrop" (ARM NDROP retrieval), "cloudnet" (scaled-Frisch N), "insitu", "aircraft" (one row per
+       near-base cloud pass from aircraft_build.py; the "hour" coordinate is the pass time)
 
 Some sites were built only on Arrhenius (Norunda, Melpitz, Bucharest, Bankhead,
 Oliktok, Maido, Andoya, the Cloudnet versions of ENA/LASIC), so their inputs must be
@@ -77,6 +79,14 @@ SITES = {
                            pnsd=("cache", "results/pnsd_cache/sgp_smps_pnsd_hourly.nc")),
     "lasic_cloudnet": dict(kind="cloudnet", regime="Marine", built="results/lasic/lasic_cloudnet_smps.nc",
                            pnsd=("cache", "results/pnsd_cache/lasic_smps_pnsd_hourly.nc")),
+    # --- aircraft campaigns (aircraft_build.py with --met-dir: per-pass w, cloud-base T/p, AMS) ---
+    "ace-ena_aircraft":  dict(kind="aircraft", regime="Marine", built="results/aircraft/ace-ena_aircraft.nc",
+                              pnsd=("built", "results/aircraft/ace-ena_aircraft.nc")),
+    "hi-scale_aircraft": dict(kind="aircraft", regime="Continental",
+                              built="results/aircraft/hi-scale_aircraft_mergedaerosolsd.nc",
+                              pnsd=("built", "results/aircraft/hi-scale_aircraft_mergedaerosolsd.nc")),
+    "activate_aircraft": dict(kind="aircraft", regime="Marine", built="results/aircraft/activate_aircraft.nc",
+                              pnsd=("built", "results/aircraft/activate_aircraft.nc")),
 }
 
 # Stations: sites that share an aerosol record (same spectra; the Cloudnet variants of the ARM sites, Kenttarova
@@ -111,6 +121,10 @@ SITE_COORDS = {
     "hyytiala": (61.847, 24.295, 181), "mace-head": (53.326, -9.899, 5), "cabauw": (51.970, 4.926, 0),
     "melpitz": (51.530, 12.928, 86), "palaiseau": (48.713, 2.208, 156), "bucharest": (44.348, 26.029, 93),
     "granada": (37.164, -3.605, 680), "schneefernerhaus": (47.417, 10.980, 2650), "norunda": (60.087, 17.480, 46),
+    # aircraft: a fixed point for the CAMS fill (dust, sea salt, BC); ACE-ENA flew around Graciosa, HI-SCALE
+    # over SGP, ACTIVATE off the US east coast (no CAMS region yet: AMS hours only, CAMS parts set to 0)
+    "ace-ena_aircraft": (39.092, -28.026, 30), "hi-scale_aircraft": (36.605, -97.486, 315),
+    "activate_aircraft": (35.5, -73.5, 0),
 }
 
 # PARSEC mass-fraction order (8 columns in the Stockholm fork):

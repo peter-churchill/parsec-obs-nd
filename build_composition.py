@@ -70,9 +70,10 @@ CAMS_REGIONS = {  # same boxes as cams_download.REGIONS (not imported, to avoid 
                "melpitz", "palaiseau", "bucharest", "granada", "schneefernerhaus", "norunda"],
     "sgp_bnf": ["sgp", "sgp_cloudnet", "bankhead"],
     "epcape": ["epcape_pier", "epcape_soledad"],
-    "ena": ["ena", "ena_cloudnet"],
+    "ena": ["ena", "ena_cloudnet", "ace-ena_aircraft"],
     "lasic": ["lasic", "lasic_cloudnet"],
 }
+CAMS_REGIONS["sgp_bnf"].append("hi-scale_aircraft")
 ARM_GROUP = {"ena": "ena", "ena_cloudnet": "ena", "sgp": "sgp", "sgp_cloudnet": "sgp",
              "lasic": "lasic", "lasic_cloudnet": "lasic", "epcape_pier": "epcape",
              "epcape_soledad": "epcape", "bankhead": "bankhead"}
@@ -156,6 +157,29 @@ def arm_bounds(ds):
         return pd.DatetimeIndex(b[:, 0]), pd.DatetimeIndex(b[:, 1])
     step = pd.Series(t).diff().median() if len(t) > 1 else pd.Timedelta("1min")
     return t, t + step
+
+
+def read_built_ams(site, hours):
+    """Aircraft sites: per-pass AMS (ug m-3) stored by aircraft_build.py --met-dir in the built file."""
+    from sites import SITES
+    cfg = SITES.get(site, {})
+    root = os.environ.get("OBS_REPO")
+    if cfg.get("kind") != "aircraft" or not root:
+        if cfg.get("kind") == "aircraft":
+            print("    aircraft AMS: set OBS_REPO to read the built file")
+        return None
+    p = os.path.join(root, cfg["built"])
+    if not os.path.exists(p):
+        return None
+    with xr.open_dataset(p) as ds:
+        if "ams_so4" not in ds:
+            print(f"    {os.path.basename(p)}: no AMS columns (built without --met-dir, or no AMS on board)")
+            return None
+        t = pd.DatetimeIndex(ds["time"].values)
+        df = pd.DataFrame({k: ds[f"ams_{k}"].values.astype(float) for k in ARM_ACSM_VARS}, index=t)
+    df = df[~df.index.duplicated()].reindex(hours)
+    print(f"    {os.path.basename(p)}: AMS for {df['so4'].notna().sum()} of {len(hours)} passes")
+    return df
 
 
 def read_arm_acsm(group, hours):
@@ -489,6 +513,9 @@ def build_site(site, dry_run=False, ccn_tier=False, ccn_ss=0.3, cams_only=False,
         g = ARM_GROUP[site]
         acsm = read_arm_acsm(g, hours)
         bc = read_arm_bc(g, hours)
+    air = read_built_ams(site, hours)
+    if air is not None:
+        acsm = air if acsm is None else acsm.combine_first(air)
     e_acsm, e_bc, filt = read_ebas_acsm(site, hours), read_ebas_bc(site, hours), read_ebas_filter(site, hours)
     acsm = e_acsm if acsm is None else (acsm if e_acsm is None else acsm.combine_first(e_acsm))
     bc = e_bc if bc is None else (bc if e_bc is None else bc.combine_first(e_bc))

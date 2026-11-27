@@ -41,7 +41,7 @@ import xarray as xr
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from sites import SITE_COORDS  # noqa: E402
+from sites import SITE_COORDS, SITES  # noqa: E402
 from updraft_download import ARM_STREAMS, CLOUDNET_RADAR_SITES, CLOUDNET_SITES  # noqa: E402
 
 # sites with neither lidar nor radar on their cloud days: per-regime sigma_w pooled from these lidar sites
@@ -211,6 +211,37 @@ def radar_site(site, hours, cbh_h, a):
     return out, None, "cloudnet_radar_above_cb"
 
 
+def aircraft_site(site, hours):
+    """Aircraft: the 1-Hz vertical wind measured during each cloud pass (aircraft_build.py --met-dir), as is
+    (not demeaned: the mean updraft of a near-base pass is part of the signal). Pass sigma_w, w_mean, n."""
+    root = os.environ.get("OBS_REPO")
+    if not root:
+        print(f"{site}: set OBS_REPO to read the aircraft built file")
+        return None
+    p = os.path.join(root, SITES[site]["built"])
+    if not os.path.exists(p):
+        print(f"{site}: built file missing ({p})")
+        return None
+    with xr.open_dataset(p) as ds:
+        if "w" not in ds:
+            print(f"{site}: built file has no w (rebuild with aircraft_build.py --met-dir)")
+            return None
+        t = pd.DatetimeIndex(ds["time"].values)
+        Wb = ds["w"].values.astype(float)
+    k = pd.Series(np.arange(len(t)), index=t)
+    k = k[~k.index.duplicated()].reindex(hours)
+    W = np.full((len(hours), Wb.shape[1]), np.nan)
+    have = k.notna().to_numpy()
+    W[have] = Wb[k[have].astype(int).to_numpy()]
+    n = np.isfinite(W).sum(axis=1)
+    out = pd.DataFrame({"sigma_w": np.nanstd(np.where(n[:, None] > 0, W, 0.0), axis=1),
+                        "w_mean": np.nanmean(np.where(n[:, None] > 0, W, 0.0), axis=1), "n": n,
+                        "sigma_w_cb": np.nan}, index=hours)
+    out.loc[n == 0, ["sigma_w", "w_mean"]] = np.nan
+    out["nmin"] = 10
+    return out, W, "aircraft_pass_w"
+
+
 def fallback_site(site, hours):
     """Constant sigma_w for every hour: median of the pooled hourly sigma_w of the FALLBACK lidar sites."""
     pool = []
@@ -270,7 +301,9 @@ def main():
     ap.add_argument("--fallback", action="store_true",
                     help="Puijo/Pallas: overwrite the paper_updrafts.py files with the pooled lidar fallback")
     a = ap.parse_args()
-    sites = a.sites or (sorted(set(ARM_STREAMS) | set(CLOUDNET_SITES) | set(CLOUDNET_RADAR_SITES) - set(FALLBACK))
+    aircraft = sorted(k for k, v in SITES.items() if v["kind"] == "aircraft")
+    sites = a.sites or (sorted(set(ARM_STREAMS) | set(CLOUDNET_SITES) | set(CLOUDNET_RADAR_SITES) | set(aircraft)
+                               - set(FALLBACK))
                         + sorted(FALLBACK))                 # fallbacks last: they pool the lidar sites' results
     os.makedirs(os.path.join(HERE, "updrafts"), exist_ok=True)
     for site in sites:
@@ -280,7 +313,9 @@ def main():
         with xr.open_dataset(p) as ds:
             hours = pd.DatetimeIndex(ds["hour"].values)
             cbh = hourly_cbh(ds, hours)
-        if site in ARM_STREAMS:
+        if SITES.get(site, {}).get("kind") == "aircraft":
+            r = aircraft_site(site, hours)
+        elif site in ARM_STREAMS:
             r = arm_site(site, hours, cbh, a)
         elif site in FALLBACK:
             q = os.path.join(HERE, "updrafts", f"{site}_w_cloudbase.nc")

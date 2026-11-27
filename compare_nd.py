@@ -62,6 +62,8 @@ def classes(site, hours):
     out["T0"], out["cbh_minus_lcl"] = T0.values, dz.values
     if SITES[site]["kind"] == "insitu":
         out["coupling"] = "in-cloud station"
+    elif SITES[site]["kind"] == "aircraft":
+        out["coupling"] = "aircraft (measured base)"
     else:
         out.loc[dz.abs() <= COUPLED_M, "coupling"] = "coupled"
         out.loc[dz.abs() > COUPLED_M, "coupling"] = "decoupled"

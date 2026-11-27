@@ -61,6 +61,21 @@ def load_pnsd(spec, root):
         stem = os.path.splitext(os.path.basename(path))[0].lower()
         cache = os.path.join(root, "results", "pnsd_cache", f"{stem}_hourly.nc")
         return pt.load_or_build(cache, builder=lambda: pt.hourly_pnsd_csv(path))
+    if kind == "built":                  # aircraft: the built file's own per-pass dN/dlogDp, put on GRID_NM
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        sys.path.insert(0, root)
+        import pnsd_tools as pt
+        grid = np.asarray(pt.GRID_NM, float)
+        with xr.open_dataset(path) as ds:
+            dim = ds["dNdlogDp"].dims[1]
+            d = ds[dim].values.astype(float)
+            a = ds["dNdlogDp"].values.astype(float)
+            t = pd.DatetimeIndex(ds["time"].values)
+        o = np.argsort(d)
+        lg, ld = np.log10(grid), np.log10(d[o])
+        out = np.array([np.interp(lg, ld, row[o], left=np.nan, right=np.nan) for row in a])
+        return pd.DataFrame(out, index=t, columns=grid)
     raise ValueError(f"unknown pnsd spec {spec}")
 
 
@@ -130,13 +145,17 @@ def build_site(name, root, outdir, dmin_max, dmax_min):
         i100 = int(np.argmin(np.abs(ds["diameter"].values - 100.0)))
         nd_obs = ds["CDNC"].values[m]
         n100 = ds["CCN"].values[m, i100]
-        cbh = ds["cloud_base_height"].values[m] if "cloud_base_height" in ds else np.full(m.sum(), np.nan)
+        cbh = (ds["cloud_base_height"].values[m] if "cloud_base_height" in ds
+               else ds["cloud_base"].values[m].astype(float) if "cloud_base" in ds    # aircraft: local base (m a.s.l.)
+               else np.full(m.sum(), np.nan))
         # measured cloud-base T and P (ARM NDROP builds); converted to K and Pa
         cbt = ds["cloud_base_temperature"].values[m].astype(float) if "cloud_base_temperature" in ds else np.full(m.sum(), np.nan)
         cbp = ds["cloud_base_pressure"].values[m].astype(float) if "cloud_base_pressure" in ds else np.full(m.sum(), np.nan)
         t_units = str(ds["cloud_base_temperature"].attrs.get("units", "")) if "cloud_base_temperature" in ds else ""
         p_units = str(ds["cloud_base_pressure"].attrs.get("units", "")) if "cloud_base_pressure" in ds else ""
         site_attr = str(ds.attrs.get("site", name))
+        extra = {k: ds[k].values[m].astype(float) for k in ("above_base", "alt", "sigma_w", "lat", "lon")
+                 if k in ds and cfg["kind"] == "aircraft"}
     cbt, cbp = _to_kelvin(cbt, t_units), _to_pa(cbp, p_units)
     hours = t[m]
     n_screen = len(hours)
@@ -170,7 +189,9 @@ def build_site(name, root, outdir, dmin_max, dmax_min):
          "thermo_source": ("hour", tsrc),
          "Nd_obs": ("hour", nd_obs[ok], {"units": "cm-3"}),
          "N100": ("hour", n100[ok], {"units": "cm-3"}),
-         "cloud_base_height": ("hour", cbh[ok], {"units": "m"})},
+         "cloud_base_height": ("hour", cbh[ok], {"units": "m"}),
+         **{f"pass_{k}": ("hour", v[ok], {"long_name": f"aircraft pass {k} (from the built file)"})
+            for k, v in extra.items()}},
         coords={"hour": hours.values,
                 "diameter": ("diameter", d, {"units": "nm"}),
                 "species": ("species", SPECIES)},

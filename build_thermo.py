@@ -358,7 +358,11 @@ def main():
     a = ap.parse_args()
     sites = a.sites or sorted(os.path.basename(p).replace("_parcel_inputs.nc", "")
                               for p in glob.glob(os.path.join(HERE, "inputs", "*_parcel_inputs.nc")))
+    from sites import SITES
     for s in sites:
+        if SITES.get(s, {}).get("kind") == "aircraft":       # T0/P0 measured at the local cloud base
+            print(f"{s}: aircraft, cloud-base T/p measured on board; skipped")
+            continue
         build_site(s, a.dry_run, a.coupled)
 
 
